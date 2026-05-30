@@ -296,3 +296,75 @@ export const onLocationDeleted = onDocumentDeleted("locations/{locationId}", asy
         logger.error("Error occurred during onLocationDeleted execution:", error);
     }
 });
+
+/**
+ * Trigger: onLocationUpdated
+ * Triggers automatically when an ADMIN updates an existing location document in the "locations" collection.
+ * Purpose: Cascade Update - If the admin changes a location's name or angle, update all users currently at that location.
+ */
+export const onLocationUpdated = onDocumentUpdated("locations/{locationId}", async (event) => {
+    const change = event.data;
+    if (!change) {
+        logger.error("No data associated with the event");
+        return;
+    }
+
+    const beforeData = change.before.data();
+    const afterData = change.after.data();
+
+    // Extract values before and after the ADMIN's update
+    const beforeName = beforeData?.locationName;
+    const afterName = afterData?.locationName;
+    const beforeAngle = beforeData?.angle;
+    const afterAngle = afterData?.angle;
+
+    // Optimization: If the admin didn't change the name or the angle, skip execution to save costs
+    if (beforeName === afterName && beforeAngle === afterAngle) {
+        logger.log(`No relevant changes (name or angle) for location ID: ${event.params.locationId}. Skipping execution.`);
+        return;
+    }
+
+    logger.log(`Admin updated location ${event.params.locationId}. Name: '${beforeName}' -> '${afterName}', Angle: ${beforeAngle} -> ${afterAngle}`);
+
+    if (!beforeName) {
+        logger.warn("Before-image missing 'locationName'. Cannot find affected users.");
+        return;
+    }
+
+    try {
+        // 1. Find all family members whose currentLocation matches the OLD name (before the admin's update)
+        const usersSnapshot = await db.collection("users")
+            .where("currentLocation", "==", beforeName)
+            .get();
+
+        // If no family members are currently at this location, exit early
+        if (usersSnapshot.empty) {
+            logger.log(`No users are currently at '${beforeName}'. No updates needed.`);
+            return;
+        }
+
+        // 2. Initialize a Write Batch to update all affected users at once
+        const batch = db.batch();
+        
+        // Determine the new values to set
+        const finalAngle = afterAngle !== undefined ? afterAngle : 0;
+        const finalLocationName = afterName || beforeName; // If name didn't change, keep the old one
+
+        usersSnapshot.docs.forEach((doc) => {
+            logger.log(`Updating user ID: ${doc.id} due to admin location change.`);
+            
+            // Update the user's document with the admin's new settings
+            batch.update(doc.ref, {
+                currentLocation: finalLocationName,
+                targetAngle: finalAngle
+            });
+        });
+
+        // 3. Commit the batch write to Firestore
+        await batch.commit();
+        logger.log(`Successfully updated ${usersSnapshot.size} users to the new admin settings.`);
+
+    } catch (error) {
+        logger.error("Error occurred during execution of onLocationUpdated:", error);
+    }
+});
