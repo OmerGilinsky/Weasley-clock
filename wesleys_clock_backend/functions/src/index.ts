@@ -1,7 +1,8 @@
 import {setGlobalOptions} from "firebase-functions";
-import { onDocumentCreated, onDocumentUpdated } from "firebase-functions/v2/firestore";
+import { onDocumentCreated, onDocumentUpdated, onDocumentDeleted} from "firebase-functions/v2/firestore";
 import * as admin from "firebase-admin";
 import * as logger from "firebase-functions/logger"; 
+import { getFirestore } from "firebase-admin/firestore";
 
 
 
@@ -177,5 +178,121 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
 
     } catch (error) {
         logger.error("Error fetching location or updating user document:", error);
+    }
+});
+
+/**
+ * Trigger: Fires when an existing user document is deleted from the "users" collection.
+ * Purpose: Performs a Cascade Delete to clear Firestore documents, cleanup physical storage files, 
+ * and naturally free up the physical clock hand for future users.
+ */
+export const onUserDeleted = onDocumentDeleted("users/{userId}", async (event) => {
+    const snapshot = event.data;
+    if (!snapshot) {
+        logger.error("No data associated with the deletion event");
+        return;
+    }
+
+    const userId = event.params.userId;
+    const userData = snapshot.data();
+    const deletedHand = userData?.handNumber || 0;
+
+    logger.log(`Starting cleanup chain for deleted user ${userId} who held clock hand #${deletedHand}`);
+
+    try {
+        // --- 1. Firestore Cascade Delete: voice_messages ---
+        const voiceMessagesRef = db.collection("voice_messages");
+        // Assuming messages are linked to the user via a "userId" or "senderId" field
+        const voiceSnapshot = await voiceMessagesRef.where("userId", "==", userId).get();
+        
+        if (!voiceSnapshot.empty) {
+            const batch = db.batch();
+            voiceSnapshot.forEach((doc) => batch.delete(doc.ref));
+            await batch.commit();
+            logger.log(`Successfully deleted ${voiceSnapshot.size} voice message documents from Firestore.`);
+        }
+
+        // --- 2. Firestore Cascade Delete: visual_greetings (Doodles/Drawings) ---
+        const visualGreetingsRef = db.collection("visual_greetings");
+        const visualSnapshot = await visualGreetingsRef.where("userId", "==", userId).get();
+        
+        if (!visualSnapshot.empty) {
+            const batch = db.batch();
+            visualSnapshot.forEach((doc) => batch.delete(doc.ref));
+            await batch.commit();
+            logger.log(`Successfully deleted ${visualSnapshot.size} visual greeting documents from Firestore.`);
+        }
+
+        // --- 3. Cloud Storage Cleanup: Storage Orphan Prevention ---
+        const bucket = admin.storage().bucket();
+        const userAudioFolder = `audio_bites/${userId}/`;
+
+        // Delete all physical audio files stored under this user's unique folder
+        await bucket.deleteFiles({
+            prefix: userAudioFolder
+        });
+        logger.log(`Successfully cleared physical storage files under path: '${userAudioFolder}'`);
+
+        logger.log(`User ${userId} cleanup completed successfully. Clock hand #${deletedHand} is now fully available.`);
+
+    } catch (error) {
+        logger.error(`Critical error occurred during the cascade deletion pipeline for user ${userId}:`, error);
+    }
+});
+
+/**
+ * Trigger: onLocationDeleted
+ * Triggers automatically when an admin deletes a location document from the "locations" collection.
+ * Purpose: Cleanup/Maintenance - Updates users who are currently at the deleted location.
+ */
+export const onLocationDeleted = onDocumentDeleted("locations/{locationId}", async (event) => {
+    const snapshot = event.data;
+    if (!snapshot) {
+        logger.error("No data associated with the event");
+        return;
+    }
+
+    // Extract the internal location name (e.g., "WORK") from the deleted document data
+    const deletedLocationData = snapshot.data();
+    const deletedLocationName = deletedLocationData?.locationName; 
+
+    if (!deletedLocationName) {
+        logger.warn(`The deleted document '${event.params.locationId}' did not contain a 'locationName' field. Cleanup aborted.`);
+        return;
+    }
+
+    logger.log(`Location '${deletedLocationName}' (ID: ${event.params.locationId}) was deleted. Starting cleanup process for affected users...`);
+
+    try {
+        // 1. Query all users whose currentLocation matches the internal location name (e.g., "WORK")
+        const usersSnapshot = await db.collection("users")
+            .where("currentLocation", "==", deletedLocationName)
+            .get();
+
+        // If no users are currently assigned to this location, exit early and log it
+        if (usersSnapshot.empty) {
+            logger.log(`No users were found with currentLocation == '${deletedLocationName}'. No updates needed.`);
+            return;
+        }
+
+        // 2. Initialize a Write Batch to perform multiple updates efficiently
+        const batch = db.batch();
+
+        usersSnapshot.docs.forEach((doc) => {
+            logger.log(`Preparing location reset for user ID: ${doc.id}`);
+            
+            // Update the user fields to default values as specified in User Story 3
+            batch.update(doc.ref, {
+                currentLocation: "Unknown Location", // Set status to unknown since the location no longer exists
+                targetAngle: 0                       // Reset motor target angle to 0 (hand pointing straight up)
+            });
+        });
+
+        // 3. Commit the batch write operation to Firestore
+        await batch.commit();
+        logger.log(`Successfully updated ${usersSnapshot.size} users following the deletion of '${deletedLocationName}'.`);
+
+    } catch (error) {
+        logger.error("Error occurred during onLocationDeleted execution:", error);
     }
 });
