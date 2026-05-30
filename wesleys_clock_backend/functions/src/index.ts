@@ -43,7 +43,7 @@ export const onUserCreated = onDocumentCreated("users/{userId}",
 
     try {
       // Fetch all allowed location documents from the dedicated admin collection
-      const locationsSnapshot = await db.collection("allowed_locations").get();
+      const locationsSnapshot = await db.collection("locations").get();
       
       // Loop through locations and collect valid location names into the array
       locationsSnapshot.forEach((doc) => {
