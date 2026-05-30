@@ -1,14 +1,13 @@
 import {setGlobalOptions} from "firebase-functions";
 import {onDocumentCreated} from "firebase-functions/v2/firestore";
 import * as admin from "firebase-admin";
-import { logger } from "firebase-functions"; 
-
+import * as logger from "firebase-functions/logger"; 
 admin.initializeApp();
 
 setGlobalOptions({maxInstances: 10});
 
 /**
- * טריגר: מתעורר ביצירת משתמש חדש
+ * Trigger: Fires when a new user document is created
  */
 export const onUserCreated = onDocumentCreated("users/{userId}",
   async (event) => {
@@ -21,26 +20,26 @@ export const onUserCreated = onDocumentCreated("users/{userId}",
     const userId = event.params.userId;
     const db = admin.firestore();
 
-    // שליפת הנתונים הגולמיים ובדיקת תקינות השם בצורה בטוחה
+    // Fetch raw data and safely check fullName validity
     const userData = snapshot.data();
     let finalName = userData && userData.fullName ? userData.fullName : null;
 
-    // הגנה: בדיקה שהשם הוא אכן מחרוזת ואינו ריק
+    // Protection: Validate that fullName is a valid, non-empty string
     if (!finalName || typeof finalName !== "string" || finalName.trim() === "") {
-      // הדפסת אזהרה כתומה ביומני הרישום של Firebase
+      // Log a warning in Firebase Function Logs
       logger.warn(`[Validation Warning] Document created without a valid fullName. ID: ${userId}. Fallback to 'Unknown User'.`);
       finalName = "Unknown User";
     }
 
-    // --- בדיקת מיקומים דינמית מול נתוני ה-GPS של האדמין ---
+    // --- Dynamic location validation against Admin GPS settings ---
     let finalLocation = userData && userData.currentLocation ? userData.currentLocation : null;
     const allowedLocationNames: string[] = [];
 
     try {
-      // שליפת כל מסמכי המיקומים וה-GPS שהאדמין הגדיר באוסף הייעודי
+      // Fetch all allowed location documents from the dedicated admin collection
       const locationsSnapshot = await db.collection("allowed_locations").get();
       
-      // מעבר על המיקומים ואסיפת שמות המיקומים החוקיים
+      // Loop through locations and collect valid location names into the array
       locationsSnapshot.forEach((doc) => {
         const locData = doc.data();
         if (locData && locData.locationName) {
@@ -51,7 +50,7 @@ export const onUserCreated = onDocumentCreated("users/{userId}",
       logger.error("Failed to fetch allowed locations with GPS from DB", err);
     }
 
-    // השוואה: אם המיקום שנתנה האפליקציה לא מופיע ברשימת האדמין - הופך ל-Unknown Location
+    // Comparison: If the app-provided location is missing or not in Admin settings, fallback to Unknown Location
     if (!finalLocation || !allowedLocationNames.includes(finalLocation)) {
       logger.warn(`[Location Warning] User ${finalName} provided location '${finalLocation}' which is not mapped with GPS. Fallback to 'Unknown Location'.`);
       finalLocation = "Unknown Location";
@@ -59,19 +58,19 @@ export const onUserCreated = onDocumentCreated("users/{userId}",
 
     try {
       await db.runTransaction(async (transaction) => {
-        // שליפת המשתמשים לבדיקת מחוגים
+        // Fetch all users to check hand allocation status
         const usersSnapshot = await transaction.get(db.collection("users"));
 
         const takenHands = new Set<number>();
         usersSnapshot.forEach((doc) => {
-          // הגנה נוספת בזמן סריקת המשתמשים הקיימים מפני נתונים חסרים
+          // Extra protection while scanning existing users for missing fields
           const docData = doc.data();
           if (doc.id !== userId && docData && docData.handNumber) {
             takenHands.add(docData.handNumber);
           }
         });
 
-        // מציאת מספר המחוג הפנוי הראשון
+        // Find the first available physical clock hand number
         let assignedHand: number | null = null;
         for (let i = 1; i <= 4; i++) {
           if (!takenHands.has(i)) {
@@ -80,12 +79,12 @@ export const onUserCreated = onDocumentCreated("users/{userId}",
           }
         }
 
-        // טיפול במקרה קצה והקצאה עם set ו-merge (כולל השם והמיקום המוגנים)
+        // Handle edge cases and allocate using set and merge (including protected name and location)
         if (assignedHand === null) {
           logger.log(`No hand for ${finalName} (${userId}). Waiting list.`);
           transaction.set(snapshot.ref, {
             fullName: finalName, 
-            currentLocation: finalLocation, // מעדכן למיקום המתוקן
+            currentLocation: finalLocation, // Updates to the safe/corrected location
             handNumber: 0,
             status: "waiting_list",
           }, { merge: true });
@@ -93,7 +92,7 @@ export const onUserCreated = onDocumentCreated("users/{userId}",
           logger.log(`Assigning hand ${assignedHand} to ${finalName}`);
           transaction.set(snapshot.ref, {
             fullName: finalName, 
-            currentLocation: finalLocation, // מעדכן למיקום המתוקן
+            currentLocation: finalLocation, // Updates to the safe/corrected location
             handNumber: assignedHand,
             status: "active",
           }, { merge: true });
