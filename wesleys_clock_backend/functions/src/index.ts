@@ -117,6 +117,75 @@ export const onUserCreated = onDocumentCreated("users/{userId}",
  * Trigger: Fires when an existing user document is updated.
  * Purpose: Detects location changes, fetches the matching physical clock angle, and updates targetAngle.
  */
+// export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (event) => {
+//     const change = event.data;
+//     if (!change) {
+//         logger.error("No data associated with the event");
+//         return;
+//     }
+
+//     const beforeData = change.before.data();
+//     const afterData = change.after.data();
+
+//     const beforeLocation = beforeData?.currentLocation;
+//     const afterLocation = afterData?.currentLocation;
+
+//     // Optimization & Cost-Savings: If the textual location hasn't changed, exit immediately
+//     if (beforeLocation === afterLocation) {
+//         logger.log(`Location did not change for user ${event.params.userId}. Skipping execution.`);
+//         return;
+//     }
+
+//     logger.log(`User ${event.params.userId} changed location from '${beforeLocation}' to '${afterLocation}'`);
+
+//     // If the new location is empty or missing, treat it as "Unknown" and set angle to 0
+//     if (!afterLocation) {
+//         logger.log("New location is empty. Setting targetAngle to default (0).");
+//         await change.after.ref.set({ targetAngle: 0 }, { merge: true });
+//         return;
+//     }
+
+//     try {
+//         //Query the "locations" collection to find the matching angle
+//         const locationsRef = db.collection("locations");
+        
+        
+//         const snapshot = await locationsRef.where("locationName", "==", afterLocation).get();
+
+//         let targetAngle = 0; // Default angle for unconfigured or missing locations
+
+//         if (snapshot.empty) {
+//             // Handle unconfigured locations (e.g., a random coffee shop not set on the clock)
+//             logger.warn(`Location '${afterLocation}' not found in locations collection. Using default angle 0.`);
+//             targetAngle = 0; 
+//         } else {
+//             // Location found! Extract the angle from the first matching document
+//             const locationDoc = snapshot.docs[0].data();
+//             if (locationDoc.angle !== undefined) {
+//                 targetAngle = locationDoc.angle;
+//                 logger.log(`Found location '${afterLocation}' with angle ${targetAngle}`);
+//             } else {
+//                 logger.warn(`Location '${afterLocation}' found but is missing the 'angle' field. Using 0.`);
+//             }
+//         }
+
+//         // Update the user's document with the newly calculated targetAngle
+//         await change.after.ref.set({
+//             targetAngle: targetAngle
+//         }, { merge: true });
+
+//         logger.log(`Successfully updated targetAngle to ${targetAngle} for user ${event.params.userId}`);
+
+//     } catch (error) {
+//         logger.error("Error fetching location or updating user document:", error);
+//     }
+// });
+
+/**
+ * Trigger: Fires when an existing user document is updated.
+ * Purpose 1: Detects location changes, fetches the matching physical clock angle, and updates targetAngle.
+ * Purpose 2: Trigger Queued Messages - Checks if the user arrived "HOME" and releases relevant pending messages.
+ */
 export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (event) => {
     const change = event.data;
     if (!change) {
@@ -146,20 +215,15 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
     }
 
     try {
-        //Query the "locations" collection to find the matching angle
+        // --- PART 1: Update targetAngle for the physical clock motor ---
         const locationsRef = db.collection("locations");
-        
-        
         const snapshot = await locationsRef.where("locationName", "==", afterLocation).get();
 
         let targetAngle = 0; // Default angle for unconfigured or missing locations
 
         if (snapshot.empty) {
-            // Handle unconfigured locations (e.g., a random coffee shop not set on the clock)
             logger.warn(`Location '${afterLocation}' not found in locations collection. Using default angle 0.`);
-            targetAngle = 0; 
         } else {
-            // Location found! Extract the angle from the first matching document
             const locationDoc = snapshot.docs[0].data();
             if (locationDoc.angle !== undefined) {
                 targetAngle = locationDoc.angle;
@@ -169,15 +233,55 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
             }
         }
 
-        // Update the user's document with the newly calculated targetAngle
-        await change.after.ref.set({
-            targetAngle: targetAngle
-        }, { merge: true });
-
+        await change.after.ref.set({ targetAngle: targetAngle }, { merge: true });
         logger.log(`Successfully updated targetAngle to ${targetAngle} for user ${event.params.userId}`);
 
+        // --- PART 2: Trigger Queued Messages On Arrival ---
+        // We only check for queued messages if the user just arrived "HOME"
+        if (afterLocation === "HOME") {
+            const userName = afterData?.fullName;
+            logger.log(`User '${userName}' arrived HOME. Checking for queued messages...`);
+
+            // Fetch all messages that are currently waiting in the queue
+            const queuedMessagesSnapshot = await db.collection("voice_messages")
+                .where("status", "==", "queued")
+                .get();
+
+            if (!queuedMessagesSnapshot.empty) {
+                // We use a Batch to update multiple messages simultaneously (saves performance and costs)
+                const batch = db.batch();
+                let messagesUpdatedCount = 0;
+
+                queuedMessagesSnapshot.docs.forEach((msgDoc) => {
+                    const msgData = msgDoc.data();
+                    const targetName = msgData.targetUserName || msgData.recipientName;
+
+                    // Condition logic: 
+                    // 1. If it's a family message (no targetName), play it because ANYONE arriving should hear it.
+                    // 2. If it's a personal message, play it ONLY if the targetName matches the user who just arrived.
+                    if (!targetName || targetName === userName) {
+                        logger.log(`Queue match found! Preparing to play message ${msgDoc.id} for ${userName || 'the family'}.`);
+                        
+                        // Add the update operation to the batch
+                        batch.update(msgDoc.ref, { status: "ready_to_play" });
+                        messagesUpdatedCount++;
+                    }
+                });
+
+                // Commit the batch to the database if we found relevant messages
+                if (messagesUpdatedCount > 0) {
+                    await batch.commit();
+                    logger.log(`Successfully triggered ${messagesUpdatedCount} queued messages for playback.`);
+                } else {
+                    logger.log("Queued messages exist, but none are for the user who just arrived. Keeping them queued.");
+                }
+            } else {
+                logger.log("No queued messages found in the database. The house is clear.");
+            }
+        }
+
     } catch (error) {
-        logger.error("Error fetching location or updating user document:", error);
+        logger.error("Error fetching location, updating user document, or processing queued messages:", error);
     }
 });
 
