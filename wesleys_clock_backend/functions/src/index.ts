@@ -368,3 +368,78 @@ export const onLocationUpdated = onDocumentUpdated("locations/{locationId}", asy
         logger.error("Error occurred during execution of onLocationUpdated:", error);
     }
 });
+
+/**
+ * Trigger: onVoiceMessageCreated
+ * Triggers automatically when a new document is added to the "voice_messages" collection.
+ * Purpose: Determines if the message should be played immediately or queued based on user locations.
+ * Supports both family-wide messages and targeted personal messages (By User Name).
+ */
+export const onVoiceMessageCreated = onDocumentCreated("voice_messages/{messageId}", async (event) => {
+    const snapshot = event.data;
+    if (!snapshot) {
+        logger.error("No data associated with the new voice message event");
+        return;
+    }
+
+    const messageData = snapshot.data();
+    
+    const targetUserName = messageData?.targetUserName || messageData?.recipientName; 
+    
+    let shouldPlayImmediately = false;
+
+    try {
+        if (targetUserName) {
+            // --- Scenario A: Targeted Personal Message (By Name) ---
+            logger.log(`Processing personal message for user name: ${targetUserName}`);
+            
+            
+            const usersSnapshot = await db.collection("users")
+                .where("fullName", "==", targetUserName)
+                .limit(1) 
+                .get();
+            
+            if (!usersSnapshot.empty) {
+                const userData = usersSnapshot.docs[0].data();
+                //CHECK IF THE TARGET IS CURRENTLY AT HOME
+                if (userData?.currentLocation === "HOME") {
+                    shouldPlayImmediately = true;
+                    logger.log(`Target user '${targetUserName}' is at HOME. Message ready to play.`);
+                } else {
+                    logger.log(`Target user '${targetUserName}' is NOT at HOME (current location: ${userData?.currentLocation}). Queuing message.`);
+                }
+            } else {
+                logger.warn(`Target user with name '${targetUserName}' not found in database. Queuing message as fallback.`);
+            }
+
+        } else {
+            // --- Scenario B: General Family Message (No specific recipient) ---
+            logger.log("Processing family message. Checking if anyone is at HOME.");
+            
+            // Check if there is at least one family member currently at "HOME"
+            const usersAtHomeSnapshot = await db.collection("users")
+                .where("currentLocation", "==", "HOME")
+                .limit(1) 
+                .get();
+                
+            if (!usersAtHomeSnapshot.empty) {
+                shouldPlayImmediately = true;
+                logger.log("At least one person is currently at HOME. Message ready to play.");
+            } else {
+                logger.log("The house is currently empty. Queuing message.");
+            }
+        }
+
+        // --- Update Message Status in Firestore ---
+        const newStatus = shouldPlayImmediately ? "ready_to_play" : "queued";
+        
+        await snapshot.ref.update({
+            status: newStatus
+        });
+        
+        logger.log(`Successfully updated voice message ${event.params.messageId} status to '${newStatus}'`);
+
+    } catch (error) {
+        logger.error("Error processing new voice message:", error);
+    }
+});
