@@ -1,5 +1,6 @@
 import {setGlobalOptions} from "firebase-functions";
 import { onDocumentCreated, onDocumentUpdated, onDocumentDeleted} from "firebase-functions/v2/firestore";
+import { onSchedule } from "firebase-functions/v2/scheduler";
 import * as admin from "firebase-admin";
 import * as logger from "firebase-functions/logger"; 
 import { getFirestore } from "firebase-admin/firestore";
@@ -119,6 +120,7 @@ export const onUserCreated = onDocumentCreated("users/{userId}",
  * Trigger: Fires when an existing user document is updated.
  * Purpose 1: Detects location changes, fetches the matching physical clock angle, and updates targetAngle.
  * Purpose 2: Trigger Queued Messages - Checks if the user arrived "HOME" and releases relevant pending messages.
+ * NEW: Validates location against allowed locations and reverts to "Unknown Location" if invalid.
  */
 export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (event) => {
     const change = event.data;
@@ -141,48 +143,54 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
 
     logger.log(`User ${event.params.userId} changed location from '${beforeLocation}' to '${afterLocation}'`);
 
-    // If the new location is empty or missing, treat it as "Unknown" and set angle to 0
-    if (!afterLocation) {
-        logger.log("New location is empty. Setting targetAngle to default (0).");
-        await change.after.ref.set({ targetAngle: 0 }, { merge: true });
+    // If the new location is empty, missing, or already "Unknown Location", handle gracefully and exit
+    if (!afterLocation || afterLocation === "Unknown Location") {
+        logger.log("Location is empty or Unknown. Setting targetAngle to default (0).");
+        await change.after.ref.set({ targetAngle: 0, currentLocation: "Unknown Location" }, { merge: true });
         return;
     }
 
     try {
-        // --- PART 1: Update targetAngle for the physical clock motor ---
+        // --- PART 1: Validate Location and Update targetAngle ---
         const locationsRef = db.collection("locations");
         const snapshot = await locationsRef.where("locationName", "==", afterLocation).get();
 
-        let targetAngle = 0; // Default angle for unconfigured or missing locations
+        let targetAngle = 0; 
+        let finalLocation = afterLocation; // Assume valid until proven otherwise
 
         if (snapshot.empty) {
-            logger.warn(`Location '${afterLocation}' not found in locations collection. Using default angle 0.`);
+            // FIX: If location is not in the list, force it to 'Unknown Location'
+            logger.warn(`Location '${afterLocation}' not found in locations collection. Reverting to 'Unknown Location'.`);
+            finalLocation = "Unknown Location"; 
         } else {
             const locationDoc = snapshot.docs[0].data();
             if (locationDoc.angle !== undefined) {
                 targetAngle = locationDoc.angle;
                 logger.log(`Found location '${afterLocation}' with angle ${targetAngle}`);
             } else {
-                logger.warn(`Location '${afterLocation}' found but is missing the 'angle' field. Using 0.`);
+                logger.warn(`Location '${afterLocation}' found but is missing 'angle'. Using 0.`);
             }
         }
 
-        await change.after.ref.set({ targetAngle: targetAngle }, { merge: true });
-        logger.log(`Successfully updated targetAngle to ${targetAngle} for user ${event.params.userId}`);
+        // Update both the angle AND the validated location (overwrites invalid locations)
+        await change.after.ref.set({ 
+            targetAngle: targetAngle,
+            currentLocation: finalLocation 
+        }, { merge: true });
+
+        logger.log(`Successfully updated user ${event.params.userId} - Location: '${finalLocation}', Angle: ${targetAngle}`);
 
         // --- PART 2: Trigger Queued Messages On Arrival ---
-        // We only check for queued messages if the user just arrived "HOME"
-        if (afterLocation === "HOME") {
+        // Only trigger if they successfully arrived HOME
+        if (finalLocation === "HOME") {
             const userName = afterData?.fullName;
             logger.log(`User '${userName}' arrived HOME. Checking for queued messages...`);
 
-            // Fetch all messages that are currently waiting in the queue
             const queuedMessagesSnapshot = await db.collection("voice_messages")
                 .where("status", "==", "queued")
                 .get();
 
             if (!queuedMessagesSnapshot.empty) {
-                // We use a Batch to update multiple messages simultaneously (saves performance and costs)
                 const batch = db.batch();
                 let messagesUpdatedCount = 0;
 
@@ -190,24 +198,18 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
                     const msgData = msgDoc.data();
                     const targetName = msgData.targetUserName || msgData.recipientName;
 
-                    // Condition logic: 
-                    // 1. If it's a family message (no targetName), play it because ANYONE arriving should hear it.
-                    // 2. If it's a personal message, play it ONLY if the targetName matches the user who just arrived.
                     if (!targetName || targetName === userName) {
                         logger.log(`Queue match found! Preparing to play message ${msgDoc.id} for ${userName || 'the family'}.`);
-                        
-                        // Add the update operation to the batch
                         batch.update(msgDoc.ref, { status: "ready_to_play" });
                         messagesUpdatedCount++;
                     }
                 });
 
-                // Commit the batch to the database if we found relevant messages
                 if (messagesUpdatedCount > 0) {
                     await batch.commit();
                     logger.log(`Successfully triggered ${messagesUpdatedCount} queued messages for playback.`);
                 } else {
-                    logger.log("Queued messages exist, but none are for the user who just arrived. Keeping them queued.");
+                    logger.log("Queued messages exist, but none are for the user who just arrived.");
                 }
             } else {
                 logger.log("No queued messages found in the database. The house is clear.");
@@ -215,10 +217,9 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
         }
 
     } catch (error) {
-        logger.error("Error fetching location, updating user document, or processing queued messages:", error);
+        logger.error("Error executing onUserLocationChanged:", error);
     }
 });
-
 /**
  * Trigger: Fires when an existing user document is deleted from the "users" collection.
  * Purpose: Performs a Cascade Delete to clear Firestore documents, cleanup physical storage files, 
@@ -539,3 +540,89 @@ export const onVisualGreetingCreated = onDocumentCreated("visual_greetings/{gree
         logger.error("Error processing visual greeting:", error);
     }
 });
+
+/**
+ * Scheduled Function: checkAndPromptMissingUpdates
+ * Triggers automatically twice a day (e.g., 08:00 and 16:00 Israel time).
+ * Purpose: Scans for users with "Unknown Location" or stale updates and sends them a push notification.
+ */
+export const checkAndPromptMissingUpdates = onSchedule(
+    {
+        schedule: "0 8,16 * * *", // Cron syntax: Runs at minute 0 past hour 8 and 16 daily
+        timeZone: "Asia/Jerusalem" // Configured for Israel timezone
+    },
+    async (event) => {
+        logger.log("Starting scheduled check for missing location updates...");
+
+        try {
+            const usersSnapshot = await db.collection("users").get();
+            
+            if (usersSnapshot.empty) {
+                logger.log("No users found in database. Exiting.");
+                return;
+            }
+
+            // Define the threshold for a "stale" update (e.g., 8 hours in milliseconds)
+            const STALE_THRESHOLD_MS = 8 * 60 * 60 * 1000;
+            const nowMs = Date.now();
+            
+            // Array to hold all push notification promises so we can send them concurrently
+            const notificationsToPromise: Promise<string>[] = [];
+            let alertCount = 0;
+
+            usersSnapshot.forEach((doc) => {
+                const userData = doc.data();
+                const userName = userData.fullName || "User";
+                const currentLocation = userData.currentLocation || "Unknown Location";
+                
+                // CRITICAL FIELDS EXPECTED FROM FLUTTER APP:
+                const fcmToken = userData.fcmToken; // The Firebase Cloud Messaging token for the device
+                const lastUpdatedTimestamp = userData.lastLocationUpdateTime; // A Firestore Timestamp object
+                
+                let needsAlert = false;
+
+                // Condition 1: Location is explicitly unknown
+                if (currentLocation === "Unknown Location" || currentLocation === "Unknown") {
+                    needsAlert = true;
+                    logger.log(`User '${userName}' has an unknown location.`);
+                } 
+                // Condition 2: Location is known but hasn't been updated in X hours
+                else if (lastUpdatedTimestamp) {
+                    const lastUpdatedMs = lastUpdatedTimestamp.toDate().getTime();
+                    if ((nowMs - lastUpdatedMs) > STALE_THRESHOLD_MS) {
+                        needsAlert = true;
+                        logger.log(`User '${userName}' hasn't updated location in over 8 hours.`);
+                    }
+                }
+
+                // If conditions are met AND we have a device token to send the message to
+                if (needsAlert && fcmToken) {
+                    const message = {
+                        notification: {
+                            title: "המשפחה מחכה לדעת איפה את/ה! 🕒",
+                            body: `היי ${userName}, אל תשכח/י לעדכן את המיקום שלך בשעון.`
+                        },
+                        token: fcmToken
+                    };
+
+                    // Queue the push notification sending process
+                    notificationsToPromise.push(admin.messaging().send(message));
+                    alertCount++;
+                } else if (needsAlert && !fcmToken) {
+                    logger.warn(`User '${userName}' needs an alert but has no 'fcmToken' registered in their document.`);
+                }
+            });
+
+            // Execute all pending push notifications to the Flutter apps at once
+            if (notificationsToPromise.length > 0) {
+                await Promise.all(notificationsToPromise);
+                logger.log(`Successfully sent ${alertCount} reminder push notifications.`);
+            } else {
+                logger.log("No users required location reminders at this time.");
+            }
+
+        } catch (error) {
+            logger.error("Error executing scheduled location checks:", error);
+        }
+    }
+);
