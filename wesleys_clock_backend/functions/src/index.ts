@@ -4,7 +4,9 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import * as admin from "firebase-admin";
 import * as logger from "firebase-functions/logger"; 
 import { getFirestore } from "firebase-admin/firestore";
-
+import { onCall, HttpsError } from "firebase-functions/v2/https";
+import { FieldValue } from "firebase-admin/firestore";
+import { onRequest } from "firebase-functions/v2/https";
 
 
 // Get the Firestore instance to share between functions
@@ -709,3 +711,437 @@ export const flagStaleLocations = onSchedule(
         }
     }
 );
+
+/**
+ * Scheduled Function: cleanupExpiredVoiceMessages
+ * Triggers automatically every day at 02:00 AM Israel time.
+ * Purpose: Cleans up old voice messages from Firestore and their associated audio files from Cloud Storage.
+ * Logic: 
+ * - Played/Listened messages: deleted after 48 hours.
+ * - Queued messages: deleted after 7 days (to prevent losing messages if a user is away).
+ */
+export const cleanupExpiredVoiceMessages = onSchedule(
+    {
+        schedule: "0 2 * * *", // Runs every day at 02:00 AM
+        timeZone: "Asia/Jerusalem" 
+    },
+    async (event) => {
+        logger.log("Starting daily cleanup of expired voice messages...");
+
+        try {
+            const nowMs = Date.now();
+            const PLAYED_THRESHOLD_MS = 48 * 60 * 60 * 1000; // 48 hours
+            const QUEUED_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+            // Optimization: We query only messages created before (Now - 48 hours). 
+            // This prevents the function from reading fresh messages and saves database reads.
+            const cutoffDate48h = new Date(nowMs - PLAYED_THRESHOLD_MS);
+            
+            const messagesSnapshot = await db.collection("voice_messages")
+                .where("timestamp", "<=", cutoffDate48h)
+                .get();
+
+            if (messagesSnapshot.empty) {
+                logger.log("No messages older than 48 hours found. Cleanup complete.");
+                return;
+            }
+
+            const batch = db.batch();
+            const bucket = admin.storage().bucket();
+            let deletedCount = 0;
+
+            // Use a standard 'for...of' loop because we are doing asynchronous Storage deletions inside
+            for (const doc of messagesSnapshot.docs) {
+                const msgData = doc.data();
+                const status = msgData.status || "queued";
+                
+                // Extract timestamp safely. Defaults to 0 if missing.
+                const msgTimestamp = msgData.timestamp?.toDate()?.getTime() || 0;
+                const audioUrl = msgData.audioUrl;
+                
+                let shouldDelete = false;
+
+                // Condition 1: Played/Listened (or stuck in ready_to_play) older than 48 hours
+                if ((status === "played" || status === "listened" || status === "ready_to_play") && 
+                    (nowMs - msgTimestamp > PLAYED_THRESHOLD_MS)) {
+                    shouldDelete = true;
+                    logger.log(`Flagging PLAYED message ${doc.id} for deletion (over 48 hours).`);
+                } 
+                // Condition 2: Queued messages older than 7 days
+                else if (status === "queued" && (nowMs - msgTimestamp > QUEUED_THRESHOLD_MS)) {
+                    shouldDelete = true;
+                    logger.log(`Flagging QUEUED message ${doc.id} for deletion (expired after 7 days).`);
+                }
+
+                if (shouldDelete) {
+                    // --- Step 1: Delete physical audio file from Cloud Storage ---
+                    if (audioUrl) {
+                        try {
+                            // Parse the Firebase Storage Download URL to extract the exact file path
+                            let filePath = "";
+                            if (audioUrl.includes("/o/")) {
+                                // Extract the string between '/o/' and '?' and decode URL characters (like %2F to '/')
+                                filePath = decodeURIComponent(audioUrl.split("/o/")[1].split("?")[0]);
+                            }
+                            
+                            if (filePath) {
+                                await bucket.file(filePath).delete();
+                                logger.log(`Successfully deleted audio file from Storage: ${filePath}`);
+                            } else {
+                                logger.warn(`Could not extract valid file path from audioUrl for message ${doc.id}`);
+                            }
+                        } catch (storageErr: any) {
+                            // If file doesn't exist (e.g., deleted manually), catch error code 404 and ignore,
+                            // otherwise log the warning. Do not break the loop.
+                            if (storageErr.code !== 404) {
+                                logger.warn(`Failed to delete Storage file for message ${doc.id}:`, storageErr);
+                            }
+                        }
+                    }
+
+                    // --- Step 2: Queue the Firestore document for deletion ---
+                    batch.delete(doc.ref);
+                    deletedCount++;
+                }
+            }
+
+            // Commit all document deletions to Firestore simultaneously
+            if (deletedCount > 0) {
+                await batch.commit();
+                logger.log(`Successfully deleted ${deletedCount} expired voice messages from database.`);
+            } else {
+                logger.log("Messages found, but none met the expiration conditions for their specific status.");
+            }
+
+        } catch (error) {
+            logger.error("Error executing cleanupExpiredVoiceMessages:", error);
+        }
+    }
+);
+
+/**
+ * Scheduled Function: clearVisualGreetings
+ * Triggers automatically every day at midnight (00:00 Israel time).
+ * Purpose 1: Resets the 'displayGreetingUrl' for all users to clear daily doodles from the LCDs.
+ * Purpose 2: Deletes old doodle documents from Firestore and their image files from Cloud Storage.
+ */
+export const clearVisualGreetings = onSchedule(
+    {
+        schedule: "0 0 * * *", // Cron syntax: Runs at 00:00 (midnight) every day
+        timeZone: "Asia/Jerusalem" // Configured for Israel timezone
+    },
+    async (event) => {
+        logger.log("Starting midnight cleanup of visual greetings...");
+
+        try {
+            const batch = db.batch();
+            let userResetCount = 0;
+            let greetingDeleteCount = 0;
+
+            // --- PART 1: Clear LCD screens for all users ---
+            const usersSnapshot = await db.collection("users").get();
+            
+            if (!usersSnapshot.empty) {
+                usersSnapshot.forEach((doc) => {
+                    const userData = doc.data();
+                    // Reset the URL only if one exists
+                    if (userData.displayGreetingUrl && userData.displayGreetingUrl !== "") {
+                        batch.update(doc.ref, { displayGreetingUrl: "" });
+                        userResetCount++;
+                    }
+                });
+            }
+
+            // --- PART 2: Delete expired visual greetings from Firestore and Storage ---
+            const greetingsSnapshot = await db.collection("visual_greetings").get();
+            const bucket = admin.storage().bucket();
+
+            if (!greetingsSnapshot.empty) {
+                // Loop to handle asynchronous Storage deletions
+                for (const doc of greetingsSnapshot.docs) {
+                    const greetingData = doc.data();
+                    const imageUrl = greetingData.imageUrl || greetingData.greetingUrl;
+
+                    // Delete the physical image file from Cloud Storage
+                    if (imageUrl) {
+                        try {
+                            let filePath = "";
+                            if (imageUrl.includes("/o/")) {
+                                filePath = decodeURIComponent(imageUrl.split("/o/")[1].split("?")[0]);
+                            }
+                            
+                            if (filePath) {
+                                await bucket.file(filePath).delete();
+                                logger.log(`Deleted doodle image from Storage: ${filePath}`);
+                            }
+                        } catch (storageErr: any) {
+                            if (storageErr.code !== 404) {
+                                logger.warn(`Failed to delete Storage file for doodle ${doc.id}:`, storageErr);
+                            }
+                        }
+                    }
+
+                    // Queue the Firestore document for deletion
+                    batch.delete(doc.ref);
+                    greetingDeleteCount++;
+                }
+            }
+
+            // --- Commit all updates and deletions together ---
+            if (userResetCount > 0 || greetingDeleteCount > 0) {
+                await batch.commit();
+                logger.log(`Successfully cleared ${userResetCount} user screens and deleted ${greetingDeleteCount} old doodles.`);
+            } else {
+                logger.log("No active visual greetings found. Everything is already clean.");
+            }
+
+        } catch (error) {
+            logger.error("Error executing midnight visual greetings cleanup:", error);
+        }
+    }
+);
+
+/**
+ * HTTP Callable Function: sendDirectLocationPrompt
+ * Trigger: Flutter app calls this endpoint when User A wants User B to update their location.
+ * Purpose: Sends a push notification to User B, protected by Auth and a 7-minute cooldown.
+ */
+export const sendDirectLocationPrompt = onCall(async (request) => {
+    // --- 1. Security Check: Verify user is authenticated ---
+    // The 'onCall' wrapper automatically verifies the Firebase Auth token.
+    if (!request.auth) {
+        throw new HttpsError(
+            "unauthenticated", 
+            "You must be logged in to send a location prompt."
+        );
+    }
+
+    const senderId = request.auth.uid; // The ID of the person pushing the button
+    const targetUserId = request.data.targetUserId; // The ID of the person they want to prompt
+
+    if (!targetUserId) {
+        throw new HttpsError(
+            "invalid-argument", 
+            "The function must be called with a 'targetUserId'."
+        );
+    }
+
+    try {
+        // --- 2. Fetch Sender and Target User Data concurrently ---
+        const targetUserRef = db.collection("users").doc(targetUserId);
+        
+        const [senderDoc, targetUserDoc] = await Promise.all([
+            db.collection("users").doc(senderId).get(),
+            targetUserRef.get()
+        ]);
+
+        if (!targetUserDoc.exists) {
+            throw new HttpsError("not-found", "Target user not found.");
+        }
+
+        const targetData = targetUserDoc.data();
+        const senderName = senderDoc.exists ? senderDoc.data()?.fullName : "A family member";
+        
+        // --- 3. Rate Limiting (7-minute cooldown anti-spam) ---
+        const lastPromptedTime = targetData?.lastPromptedTime;
+        const nowMs = Date.now();
+        const COOLDOWN_MS = 7 * 60 * 1000; // 7 minutes in milliseconds
+
+        if (lastPromptedTime) {
+            // Convert Firestore Timestamp to milliseconds
+            const lastPromptedMs = lastPromptedTime.toDate().getTime();
+            if (nowMs - lastPromptedMs < COOLDOWN_MS) {
+                // Calculate remaining minutes for a helpful error message to the Flutter UI
+                const remainingMins = Math.ceil((COOLDOWN_MS - (nowMs - lastPromptedMs)) / 60000);
+                throw new HttpsError(
+                    "resource-exhausted", 
+                    `Please wait ${remainingMins} minutes before prompting this user again.`
+                );
+            }
+        }
+
+        // --- 4. Verify Target has an FCM Token ---
+        const fcmToken = targetData?.fcmToken;
+        if (!fcmToken) {
+            throw new HttpsError(
+                "failed-precondition", 
+                "Target user does not have a registered device token for notifications."
+            );
+        }
+
+        // --- 5. Send the Push Notification via FCM ---
+        const message = {
+            notification: {
+                title: "איפה את/ה? 📍",
+                body: `${senderName} מחכה שתעדכן/י מיקום בשעון המשפחתי!`
+            },
+            token: fcmToken
+        };
+
+        await admin.messaging().send(message);
+        logger.log(`Prompt sent successfully from '${senderName}' to user ID: '${targetUserId}'`);
+
+        // --- 6. Update the Cooldown Timestamp ---
+        // We use serverTimestamp() to ensure time accuracy across different devices
+        await targetUserRef.update({
+            lastPromptedTime: FieldValue.serverTimestamp()
+        });
+
+        // --- 7. Return Success Response to Flutter ---
+        return {
+            status: "success",
+            message: "Location prompt sent successfully."
+        };
+
+    } catch (error: any) {
+        logger.error("Error in sendDirectLocationPrompt:", error);
+        
+        // If it's already an HttpsError (like our cooldown restriction), throw it directly to the client
+        if (error instanceof HttpsError) {
+            throw error;
+        }
+        // Otherwise, wrap unexpected internal errors
+        throw new HttpsError("internal", "An internal error occurred while sending the prompt.");
+    }
+});
+
+/**
+ * HTTP Request Function: getClockInitConfig
+ * Trigger: ESP32 hardware calls this standard HTTP GET endpoint on startup or reset.
+ * Purpose: Fetches all active locations and their corresponding angles.
+ * Returns: A lightweight JSON object optimized for C++ ArduinoJson parsing.
+ */
+export const getClockInitConfig = onRequest(async (request, response) => {
+    // --- 1. Restrict to GET requests only ---
+    // Hardware should only read data, not modify it via this endpoint.
+    if (request.method !== "GET") {
+        response.status(405).json({ error: "Method Not Allowed. Please use GET." });
+        return;
+    }
+
+    try {
+        logger.log("ESP32 hardware requested clock initialization config.");
+
+        // --- 2. Fetch all locations from Firestore ---
+        const locationsSnapshot = await db.collection("locations").get();
+        
+        // We will build an array of location objects. 
+        // This array structure is very easy to parse using ArduinoJson on the ESP32.
+        const locationsArray: any[] = [];
+
+        locationsSnapshot.forEach((doc) => {
+            const data = doc.data();
+            
+            // Validate that the document actually has the required fields
+            if (data.locationName && data.angle !== undefined) {
+                locationsArray.push({
+                    name: data.locationName,
+                    angle: data.angle
+                });
+            } else {
+                logger.warn(`Skipped invalid location document: ${doc.id}`);
+            }
+        });
+
+        // --- 3. Return the JSON payload to the hardware ---
+        // Setting a 200 OK status and sending the structured data
+        response.status(200).json({
+            status: "success",
+            total_locations: locationsArray.length,
+            locations: locationsArray
+        });
+
+        logger.log(`Successfully returned ${locationsArray.length} locations to the ESP32.`);
+
+    } catch (error) {
+        logger.error("Error fetching hardware init config:", error);
+        // Send a 500 Internal Server Error if something crashes
+        response.status(500).json({ error: "Internal Server Error" });
+    }
+});
+
+/**
+ * HTTP Request Function: reportHardwareStatus
+ * Trigger: ESP32 hardware sends an HTTP POST request when it encounters an error or status change.
+ * Purpose: Logs the issue to the 'system_status' document in Firestore.
+ * If the error is critical, it attempts to send a Push Notification to the system Admin.
+ */
+export const reportHardwareStatus = onRequest(async (request, response) => {
+    // --- 1. Restrict to POST requests only ---
+    // The hardware must send a POST request containing the error data in the body.
+    if (request.method !== "POST") {
+        response.status(405).json({ error: "Method Not Allowed. Please use POST." });
+        return;
+    }
+
+    try {
+        // Extract data from the incoming JSON body sent by the ESP32
+        const { errorCode, errorMessage, severity, timestamp } = request.body;
+
+        if (!errorCode || !severity) {
+            logger.warn("Received malformed hardware status report:", request.body);
+            response.status(400).json({ error: "Bad Request. Missing errorCode or severity." });
+            return;
+        }
+
+        logger.log(`Received hardware report: Code [${errorCode}], Severity [${severity}]`);
+
+        // --- 2. Update the System Status Document in Firestore ---
+        // We maintain a single document 'clock_health' inside a 'system_status' collection
+        const systemStatusRef = db.collection("system_status").doc("clock_health");
+        
+        await systemStatusRef.set({
+            lastReportTime: FieldValue.serverTimestamp(),
+            hardwareTimestamp: timestamp || Date.now(),
+            currentErrorCode: errorCode,
+            currentErrorMessage: errorMessage || "No detailed message provided.",
+            severityLevel: severity,
+            status: severity === "critical" || severity === "error" ? "needs_attention" : "operational"
+        }, { merge: true });
+
+        logger.log("Successfully updated system_status document in Firestore.");
+
+        // --- 3. Alert the Admin if the severity is CRITICAL ---
+        if (severity === "critical") {
+            logger.log("Critical error detected. Attempting to alert the Admin...");
+            
+            // Query for the admin user to get their FCM token
+            const adminSnapshot = await db.collection("users")
+                .where("role", "==", "admin")
+                .limit(1)
+                .get();
+
+            if (!adminSnapshot.empty) {
+                const adminDoc = adminSnapshot.docs[0].data();
+                const fcmToken = adminDoc.fcmToken;
+
+                if (fcmToken) {
+                    const message = {
+                        notification: {
+                            title: "⚠️ התראת חומרה: שעון המשפחה",
+                            body: `זוהתה תקלה קריטית: ${errorMessage || errorCode}. נא לבדוק את השעון.`
+                        },
+                        token: fcmToken
+                    };
+
+                    await admin.messaging().send(message);
+                    logger.log("Critical Push Notification sent to Admin.");
+                } else {
+                    logger.warn("Admin user found, but no FCM token is registered to send the alert.");
+                }
+            } else {
+                logger.warn("No user with role 'admin' found in the database. Cannot send Push Notification.");
+            }
+        }
+
+        // --- 4. Acknowledge Receipt to the Hardware ---
+        response.status(200).json({
+            status: "success",
+            message: "Report logged successfully."
+        });
+
+    } catch (error) {
+        logger.error("Error processing hardware status report:", error);
+        response.status(500).json({ error: "Internal Server Error" });
+    }
+});
