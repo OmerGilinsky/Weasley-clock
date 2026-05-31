@@ -626,3 +626,86 @@ export const checkAndPromptMissingUpdates = onSchedule(
         }
     }
 );
+
+/**
+ * Scheduled Function: flagStaleLocations
+ * Triggers automatically every hour at minute 0.
+ * Purpose: Scans for users who haven't updated their location in over 12 hours.
+ * If a location is stale, it automatically reverts the user to "Unknown Location" 
+ * and resets their physical clock hand to angle 0.
+ */
+export const flagStaleLocations = onSchedule(
+    {
+        schedule: "0 * * * *", // Cron syntax: Runs every hour exactly at the top of the hour
+        timeZone: "Asia/Jerusalem" // Configured for Israel timezone
+    },
+    async (event) => {
+        logger.log("Starting hourly check for stale locations...");
+
+        try {
+            const usersSnapshot = await db.collection("users").get();
+            
+            if (usersSnapshot.empty) {
+                logger.log("No users found in database. Exiting.");
+                return;
+            }
+
+            // Define the threshold for a "stale" update (12 hours in milliseconds)
+            const STALE_THRESHOLD_MS = 12 * 60 * 60 * 1000;
+            const nowMs = Date.now();
+            
+            // Use a batch write to efficiently update multiple users at once
+            const batch = db.batch();
+            let staleCount = 0;
+
+            usersSnapshot.forEach((doc) => {
+                const userData = doc.data();
+                const userName = userData.fullName || "Unknown User";
+                const currentLocation = userData.currentLocation;
+                const lastUpdatedTimestamp = userData.lastLocationUpdateTime;
+
+                // If the user is already at an Unknown Location, skip them to save operations
+                if (!currentLocation || currentLocation === "Unknown Location") {
+                    return; 
+                }
+
+                // Check if the timestamp exists and calculate the difference
+                if (lastUpdatedTimestamp) {
+                    const lastUpdatedMs = lastUpdatedTimestamp.toDate().getTime();
+                    const timeDifference = nowMs - lastUpdatedMs;
+
+                    if (timeDifference > STALE_THRESHOLD_MS) {
+                        logger.log(`User '${userName}' has a stale location (Over 12 hours). Reverting to Unknown Location.`);
+                        
+                        // Add the update operation to the batch
+                        batch.update(doc.ref, {
+                            currentLocation: "Unknown Location",
+                            targetAngle: 0
+                        });
+                        staleCount++;
+                    }
+                } else {
+                    // Edge Case: If the user has a location but NO timestamp was ever recorded, 
+                    // we flag them as stale for safety.
+                    logger.warn(`User '${userName}' has a set location but no 'lastLocationUpdateTime'. Reverting to Unknown Location.`);
+                    batch.update(doc.ref, {
+                        currentLocation: "Unknown Location",
+                        targetAngle: 0
+                    });
+                    staleCount++;
+                }
+            });
+
+            // Commit the batch to the database if we found any stale users
+            if (staleCount > 0) {
+                await batch.commit();
+                logger.log(`Successfully reset ${staleCount} stale user(s) to Unknown Location.`);
+            } else {
+                logger.log("All user locations are up to date. No stale locations found.");
+            }
+
+        } catch (error) {
+            logger.error("Error executing scheduled stale locations check:", error);
+        }
+    }
+);
