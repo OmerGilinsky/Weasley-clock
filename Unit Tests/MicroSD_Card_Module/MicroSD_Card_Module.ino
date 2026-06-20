@@ -42,6 +42,8 @@
 
 #define SD_CS     5
 
+#define STACK_SIZE  8192
+
 TFT_eSPI tft = TFT_eSPI();
 
 Audio audio;
@@ -64,6 +66,49 @@ bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) 
 
 void targetDisplay(uint8_t targetCsPin) {
   currentTargetCS = targetCsPin;
+}
+
+void display(void* params) {
+
+  uint8_t frame = 0;
+
+  while(true) {
+    switch (frame) {
+      case 0:
+        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Henesys.jpg", SD);
+        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Ellinia.jpg", SD);
+        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Kerning City.jpg", SD);
+        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Perion.jpg", SD);
+        frame = 1;
+        break;
+      case 1:
+        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Ellinia.jpg", SD);
+        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Kerning City.jpg", SD);
+        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Perion.jpg", SD);
+        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Henesys.jpg", SD);
+        frame = 2;
+        break;
+      case 2:
+        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Kerning City.jpg", SD);
+        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Perion.jpg", SD);
+        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Henesys.jpg", SD);
+        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Ellinia.jpg", SD);
+        frame = 3;
+        break;
+      case 3:
+        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Perion.jpg", SD);
+        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Henesys.jpg", SD);
+        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Ellinia.jpg", SD);
+        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Kerning City.jpg", SD);
+        frame = 0;
+        break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(2500));
+  }
+}
+
+void play(void* params) {
+  audio.loop();
 }
 
 void setup() {
@@ -116,85 +161,9 @@ void setup() {
   audio.connecttoFS(SD, "/MapleStory_sounds/Logo.wav");
   audio.setFileLoop(true);
 
-  delay(5000);
+  xTaskCreate(display, "display", 8192, nullptr, 5, nullptr);
 }
 
 void loop() {
   audio.loop();
-
-  if (millis() - lastDisplaySwitch >= 1000) {
-
-    lastDisplaySwitch = millis(); 
-
-    switch (currentFrameIndex) {
-
-      case 0:
-        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Henesys.jpg", SD);
-        currentFrameIndex = 1;
-        break;
-      case 1:
-        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Ellinia.jpg", SD);
-        currentFrameIndex = 2;
-        break;
-      case 2:
-        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Kerning City.jpg", SD);
-        currentFrameIndex = 3;
-        break;
-      case 3:
-        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Perion.jpg", SD);
-        currentFrameIndex = 4;
-        break;
-
-      case 4:
-        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Ellinia.jpg", SD);
-        currentFrameIndex = 5;
-        break;
-      case 5:
-        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Kerning City.jpg", SD);
-        currentFrameIndex = 6;
-        break;
-      case 6:
-        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Perion.jpg", SD);
-        currentFrameIndex = 7;
-        break;
-      case 7:
-        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Henesys.jpg", SD);
-        currentFrameIndex = 8;
-        break;
-
-      case 8:
-        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Kerning City.jpg", SD);
-        currentFrameIndex = 9;
-        break;
-      case 9:
-        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Perion.jpg", SD);
-        currentFrameIndex = 10;
-        break;
-      case 10:
-        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Henesys.jpg", SD);
-        currentFrameIndex = 11;
-        break;
-      case 11:
-        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Ellinia.jpg", SD);
-        currentFrameIndex = 12;
-        break;
-
-      case 12:
-        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Perion.jpg", SD);
-        currentFrameIndex = 13;
-        break;
-      case 13:
-        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Henesys.jpg", SD);
-        currentFrameIndex = 14;
-        break;
-      case 14:
-        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Ellinia.jpg", SD);
-        currentFrameIndex = 15;
-        break;
-      case 15:
-        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Kerning City.jpg", SD);
-        currentFrameIndex = 0;
-        break;
-    }
-  }
 }
