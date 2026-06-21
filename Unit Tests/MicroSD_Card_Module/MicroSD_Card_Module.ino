@@ -4,17 +4,17 @@
 //TFT_SDA   D23
 //TFT_RES   D4
 //TFT_DC    D2
-//TFT_CS1   D15
-//TFT_CS2   D14
-//TFT_CS3   D12
-//TFT_CS4   D13
+//TFT_CS1   D13
+//TFT_CS2   D12
+//TFT_CS3   D14
+//TFT_CS4   D27
 //TFT_BLK   3V3
 
 //I2S_VIN   3V3
 //I2C_GND   GND
-//I2C_LCK   D27
-//I2C_DIN   D26
-//I2C_BCK   D25
+//I2C_LCK   D26
+//I2C_DIN   D25
+//I2C_BCK   D33
 
 //SD_3V3    3V3
 //SD_CS     D5
@@ -31,14 +31,14 @@
 
 #include "SD.h"
 
-#define CS_DISP1  15
-#define CS_DISP2  14
-#define CS_DISP3  12
-#define CS_DISP4  13
+#define CS_DISP1  13
+#define CS_DISP2  12
+#define CS_DISP3  14
+#define CS_DISP4  27
 
-#define I2S_DOUT  26
-#define I2S_BCLK  25
-#define I2S_LRC   27
+#define I2S_DOUT  25
+#define I2S_BCLK  33
+#define I2S_LRC   26
 
 #define SD_CS     5
 
@@ -75,6 +75,7 @@ void display(void* params) {
   while(true) {
     switch (frame) {
       case 0:
+        Serial.println("Henesys -> 1, Ellinia -> 2, Kerning -> 3, Perion -> 4");
         targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Henesys.jpg", SD);
         targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Ellinia.jpg", SD);
         targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Kerning City.jpg", SD);
@@ -82,6 +83,7 @@ void display(void* params) {
         frame = 1;
         break;
       case 1:
+        Serial.println("Ellinia -> 1, Kerning -> 2, Perion -> 3, Henesys -> 4");
         targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Ellinia.jpg", SD);
         targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Kerning City.jpg", SD);
         targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Perion.jpg", SD);
@@ -89,6 +91,7 @@ void display(void* params) {
         frame = 2;
         break;
       case 2:
+        Serial.println("Kerning -> 1, Perion -> 2, Henesys -> 3, Ellinia -> 4");
         targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Kerning City.jpg", SD);
         targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Perion.jpg", SD);
         targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Henesys.jpg", SD);
@@ -96,6 +99,7 @@ void display(void* params) {
         frame = 3;
         break;
       case 3:
+        Serial.println("Perion -> 1, Henesys -> 2, Ellinia -> 3, Kerning -> 4");
         targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Perion.jpg", SD);
         targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Henesys.jpg", SD);
         targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Ellinia.jpg", SD);
@@ -161,7 +165,7 @@ void setup() {
   audio.connecttoFS(SD, "/MapleStory_sounds/Logo.wav");
   audio.setFileLoop(true);
 
-  xTaskCreate(display, "display", 8192, nullptr, 5, nullptr);
+  xTaskCreatePinnedToCore(display, "display", 8192, nullptr, 5, nullptr, 0);
 }
 
 void loop() {

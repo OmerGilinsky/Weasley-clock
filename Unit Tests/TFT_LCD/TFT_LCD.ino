@@ -12,10 +12,10 @@
 #include <TFT_eSPI.h>
 #include <TJpg_Decoder.h>
 
-#define CS_DISP1 15
-#define CS_DISP2 14
-#define CS_DISP3 12
-#define CS_DISP4 13
+#define CS_DISP1 13
+#define CS_DISP2 12
+#define CS_DISP3 14
+#define CS_DISP4 27
 
 TFT_eSPI tft = TFT_eSPI();
 
