@@ -42,7 +42,7 @@
 
 #define SD_CS     5
 
-#define STACK_SIZE  8192
+#define STACK_SIZE  4096
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -75,44 +75,40 @@ void display(void* params) {
   while(true) {
     switch (frame) {
       case 0:
+        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/Henesys.jpg", SD);
+        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/Ellinia.jpg", SD);
+        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/Kerning.jpg", SD);
+        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/Perion.jpg", SD);
         Serial.println("Henesys -> 1, Ellinia -> 2, Kerning -> 3, Perion -> 4");
-        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Henesys.jpg", SD);
-        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Ellinia.jpg", SD);
-        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Kerning City.jpg", SD);
-        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Perion.jpg", SD);
         frame = 1;
         break;
       case 1:
+        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/Ellinia.jpg", SD);
+        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/Kerning.jpg", SD);
+        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/Perion.jpg", SD);
+        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/Henesys.jpg", SD);
         Serial.println("Ellinia -> 1, Kerning -> 2, Perion -> 3, Henesys -> 4");
-        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Ellinia.jpg", SD);
-        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Kerning City.jpg", SD);
-        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Perion.jpg", SD);
-        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Henesys.jpg", SD);
         frame = 2;
         break;
       case 2:
+        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/Kerning.jpg", SD);
+        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/Perion.jpg", SD);
+        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/Henesys.jpg", SD);
+        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/Ellinia.jpg", SD);
         Serial.println("Kerning -> 1, Perion -> 2, Henesys -> 3, Ellinia -> 4");
-        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Kerning City.jpg", SD);
-        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Perion.jpg", SD);
-        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Henesys.jpg", SD);
-        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Ellinia.jpg", SD);
         frame = 3;
         break;
       case 3:
+        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/Perion.jpg", SD);
+        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/Henesys.jpg", SD);
+        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/Ellinia.jpg", SD);
+        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/Kerning.jpg", SD);
         Serial.println("Perion -> 1, Henesys -> 2, Ellinia -> 3, Kerning -> 4");
-        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Perion.jpg", SD);
-        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Henesys.jpg", SD);
-        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Ellinia.jpg", SD);
-        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/MapleStory_icons/Kerning City.jpg", SD);
         frame = 0;
         break;
     }
     vTaskDelay(pdMS_TO_TICKS(2500));
   }
-}
-
-void play(void* params) {
-  audio.loop();
 }
 
 void setup() {
@@ -162,10 +158,10 @@ void setup() {
 
   audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
   audio.setVolume(10);
-  audio.connecttoFS(SD, "/MapleStory_sounds/Logo.wav");
+  audio.connecttoFS(SD, "/Logo.wav");
   audio.setFileLoop(true);
 
-  xTaskCreatePinnedToCore(display, "display", 8192, nullptr, 5, nullptr, 0);
+  xTaskCreatePinnedToCore(display, "display", STACK_SIZE, nullptr, 5, nullptr, 0);
 }
 
 void loop() {
