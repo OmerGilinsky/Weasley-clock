@@ -16,20 +16,11 @@
 //I2C_DIN   D25
 //I2C_BCK   D33
 
-//SD_3V3    3V3
-//SD_CS     D5
-//SD_MOSI   D23
-//SD_CLK    D18
-//SD_MISO   D19
-//SD_GND    GND
-
 #include <TFT_eSPI.h>
 #include <TJpg_Decoder.h>
 
 #include "Audio.h"
 #include "FS.h"
-
-#include "SD.h"
 
 #define CS_DISP1  13
 #define CS_DISP2  12
@@ -40,8 +31,6 @@
 #define I2S_BCLK  33
 #define I2S_LRC   26
 
-#define SD_CS     5
-
 #define STACK_SIZE  4096
 
 TFT_eSPI tft = TFT_eSPI();
@@ -51,7 +40,6 @@ Audio audio;
 uint8_t currentTargetCS = CS_DISP1;
 
 unsigned long lastDisplaySwitch = 0;
-uint8_t currentFrameIndex = 0;
 
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
 
@@ -75,35 +63,35 @@ void display(void* params) {
   while(true) {
     switch (frame) {
       case 0:
-        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/Henesys.jpg", SD);
-        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/Ellinia.jpg", SD);
-        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/Kerning.jpg", SD);
-        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/Perion.jpg", SD);
+        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/Henesys.jpg", SPIFFS);
+        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/Ellinia.jpg", SPIFFS);
+        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/Kerning.jpg", SPIFFS);
+        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/Perion.jpg", SPIFFS);
         Serial.println("Henesys -> 1, Ellinia -> 2, Kerning -> 3, Perion -> 4");
         frame = 1;
         break;
       case 1:
-        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/Ellinia.jpg", SD);
-        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/Kerning.jpg", SD);
-        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/Perion.jpg", SD);
-        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/Henesys.jpg", SD);
+        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/Ellinia.jpg", SPIFFS);*
+        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/Kerning.jpg", SPIFFS);
+        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/Perion.jpg", SPIFFS);
+        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/Henesys.jpg", SPIFFS);
         Serial.println("Ellinia -> 1, Kerning -> 2, Perion -> 3, Henesys -> 4");
         frame = 2;
         break;
       case 2:
-        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/Kerning.jpg", SD);
-        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/Perion.jpg", SD);
-        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/Henesys.jpg", SD);
-        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/Ellinia.jpg", SD);
+        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/Kerning.jpg", SPIFFS);
+        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/Perion.jpg", SPIFFS);
+        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/Henesys.jpg", SPIFFS);
+        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/Ellinia.jpg", SPIFFS);
         Serial.println("Kerning -> 1, Perion -> 2, Henesys -> 3, Ellinia -> 4");
         frame = 3;
         break;
       case 3:
-        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/Perion.jpg", SD);
-        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/Henesys.jpg", SD);
-        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/Ellinia.jpg", SD);
-        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/Kerning.jpg", SD);
-        Serial.println("Perion -> 1, Henesys -> 2, Ellinia -> 3, Kerning -> 4");
+        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/Perion.jpg", SPIFFS);
+        targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/Henesys.jpg", SPIFFS);
+        targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/Ellinia.jpg", SPIFFS);
+        targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/Kerning.jpg", SPIFFS);
+        
         frame = 0;
         break;
     }
@@ -119,19 +107,16 @@ void setup() {
   pinMode(CS_DISP2, OUTPUT);
   pinMode(CS_DISP3, OUTPUT);
   pinMode(CS_DISP4, OUTPUT);
-  pinMode(SD_CS, OUTPUT);
 
   digitalWrite(CS_DISP1, HIGH);
   digitalWrite(CS_DISP2, HIGH);
   digitalWrite(CS_DISP3, HIGH);
   digitalWrite(CS_DISP4, HIGH);
-  digitalWrite(SD_CS, HIGH);
 
-  if (!SD.begin(SD_CS)) {
-    Serial.println("An Error has occurred while mounting SD Card");
+  if (!SPIFFS.begin(true)) {
+    Serial.println("SPIFFS Mount Failed");
     return;
   }
-  Serial.println("SD Card mounted successfully.");
 
   digitalWrite(CS_DISP1, LOW);
   digitalWrite(CS_DISP2, LOW);
@@ -158,7 +143,7 @@ void setup() {
 
   audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
   audio.setVolume(10);
-  audio.connecttoFS(SD, "/Logo.wav");
+  audio.connecttoFS(SPIFFS, "/123_u8.wav");
   audio.setFileLoop(true);
 
   xTaskCreatePinnedToCore(display, "display", STACK_SIZE, nullptr, 5, nullptr, 0);
