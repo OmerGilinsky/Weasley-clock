@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "448659925382",
+    "project_id": "wesleys-clock",
+    "storage_bucket": "wesleys-clock.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:448659925382:android:8e75b9ddfff5d43ab32407",
+        "android_client_info": {
+          "package_name": "com.iot.technion.wesleys_clock"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAIZR4sivQZWc8blwnNkXsbEEnOthcBmH4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
