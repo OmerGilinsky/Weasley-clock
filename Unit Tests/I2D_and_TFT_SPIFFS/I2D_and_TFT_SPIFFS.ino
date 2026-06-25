@@ -71,7 +71,7 @@ void display(void* params) {
         frame = 1;
         break;
       case 1:
-        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/Ellinia.jpg", SPIFFS);*
+        targetDisplay(CS_DISP1); TJpgDec.drawFsJpg(0, 0, "/Ellinia.jpg", SPIFFS);
         targetDisplay(CS_DISP2); TJpgDec.drawFsJpg(0, 0, "/Kerning.jpg", SPIFFS);
         targetDisplay(CS_DISP3); TJpgDec.drawFsJpg(0, 0, "/Perion.jpg", SPIFFS);
         targetDisplay(CS_DISP4); TJpgDec.drawFsJpg(0, 0, "/Henesys.jpg", SPIFFS);
