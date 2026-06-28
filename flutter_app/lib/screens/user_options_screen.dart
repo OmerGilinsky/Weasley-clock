@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
@@ -236,17 +237,22 @@ class _UserOptionsScreenState extends State<UserOptionsScreen> {
         return null;
       }
 
-      final tempDirectory = await getTemporaryDirectory();
-      final path = '${tempDirectory.path}/voice_message_$timestamp.m4a';
-
-      await recorder.start(
-        const RecordConfig(
-          encoder: AudioEncoder.aacLc,
-          bitRate: 128000,
-          sampleRate: 44100,
-        ),
-        path: path,
+      final config = RecordConfig(
+        encoder: kIsWeb ? AudioEncoder.opus : AudioEncoder.aacLc,
+        bitRate: 128000,
+        sampleRate: 44100,
       );
+
+      if (kIsWeb) {
+        await recorder.start(
+          config,
+          path: 'voice_message_$timestamp.webm',
+        );
+      } else {
+        final tempDirectory = await getTemporaryDirectory();
+        final path = '${tempDirectory.path}/voice_message_$timestamp.m4a';
+        await recorder.start(config, path: path);
+      }
 
       if (!mounted) {
         await recorder.cancel();
@@ -284,7 +290,7 @@ class _UserOptionsScreenState extends State<UserOptionsScreen> {
 
       final bytes = await XFile(recordedPath).readAsBytes();
       return _PickedUploadFile(
-        name: 'voice_message_$timestamp.m4a',
+        name: 'voice_message_$timestamp.${kIsWeb ? 'webm' : 'm4a'}',
         bytes: bytes,
       );
     } finally {
@@ -384,6 +390,26 @@ class _UserOptionsScreenState extends State<UserOptionsScreen> {
       file.bytes,
       SettableMetadata(
         contentType: _contentTypeForFileName(file.name, fallbackContentType),
+      ),
+    );
+
+    final downloadUrl = await ref.getDownloadURL();
+    return _UploadedLocationAsset(ref: ref, downloadUrl: downloadUrl);
+  }
+
+  Future<_UploadedLocationAsset> _uploadUserVoiceRecording({
+    required String userId,
+    required _PickedUploadFile file,
+  }) async {
+    final safeFileName = _sanitizeStorageSegment(file.name);
+    final path =
+        'user_voice/$userId/${DateTime.now().millisecondsSinceEpoch}_$safeFileName';
+    final ref = FirebaseStorage.instance.ref(path);
+
+    await ref.putData(
+      file.bytes,
+      SettableMetadata(
+        contentType: _contentTypeForFileName(file.name, 'audio/mpeg'),
       ),
     );
 
@@ -946,6 +972,53 @@ class _UserOptionsScreenState extends State<UserOptionsScreen> {
     }
   }
 
+  Future<void> _saveUserVoice() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('You must be logged in to save your voice.'),
+        ),
+      );
+      return;
+    }
+
+    try {
+      final recording = await _recordVoiceMessage();
+      if (recording == null) {
+        return;
+      }
+
+      final uploaded = await _uploadUserVoiceRecording(
+        userId: user.uid,
+        file: recording,
+      );
+
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+        'user_voice': uploaded.downloadUrl,
+        'userVoiceUpdatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Your voice recording was saved.')),
+      );
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Failed to save your voice. Please try again.'),
+        ),
+      );
+    }
+  }
+
   Future<void> _setGpsLocation() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
@@ -1074,6 +1147,15 @@ class _UserOptionsScreenState extends State<UserOptionsScreen> {
               onPressed: _sendGreeting,
               icon: const Icon(Icons.mail),
               label: const Text('Send Greeting'),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+              ),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: _saveUserVoice,
+              icon: const Icon(Icons.mic),
+              label: const Text('Record My Voice'),
               style: ElevatedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(vertical: 16),
               ),

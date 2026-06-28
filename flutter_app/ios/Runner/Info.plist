@@ -28,6 +28,8 @@
 	<true/>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Location is used to detect when you are near a saved clock location.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Microphone is used to record voice greetings and your personal voice message.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
