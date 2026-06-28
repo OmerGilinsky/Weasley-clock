@@ -1,19 +1,20 @@
 import {setGlobalOptions} from "firebase-functions";
 import { onDocumentCreated, onDocumentUpdated, onDocumentDeleted} from "firebase-functions/v2/firestore";
 import { onSchedule } from "firebase-functions/v2/scheduler";
-import * as admin from "firebase-admin";
 import * as logger from "firebase-functions/logger"; 
-import { getFirestore } from "firebase-admin/firestore";
+import { initializeApp, getApps } from "firebase-admin/app";
+import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { getStorage } from "firebase-admin/storage";
+import { getMessaging } from "firebase-admin/messaging";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
-import { FieldValue } from "firebase-admin/firestore";
 import { onRequest } from "firebase-functions/v2/https";
 
 
 // Get the Firestore instance to share between functions
-if (admin.apps.length === 0) {
-    admin.initializeApp();
+if (getApps().length === 0) {
+    initializeApp();
 }
-const db = admin.firestore();
+const db = getFirestore();
 
 setGlobalOptions({maxInstances: 10});
 
@@ -75,16 +76,22 @@ export const onUserCreated = onDocumentCreated("users/{userId}",
         usersSnapshot.forEach((doc) => {
           // Extra protection while scanning existing users for missing fields
           const docData = doc.data();
-          if (doc.id !== userId && docData && docData.handNumber) {
-            takenHands.add(docData.handNumber);
+                    const existingHand = docData?.handNumber;
+                    if (
+                        doc.id !== userId &&
+                        typeof existingHand === "number" &&
+                        existingHand >= 0 &&
+                        existingHand <= 3
+                    ) {
+                        takenHands.add(existingHand);
           }
         });
 
-        // Find the first available physical clock hand number
+                // Find the first available physical clock hand number in [0, 1, 2, 3]
         let assignedHand: number | null = null;
-        for (let i = 1; i <= 4; i++) {
-          if (!takenHands.has(i)) {
-            assignedHand = i;
+                for (const hand of [0, 1, 2, 3]) {
+                    if (!takenHands.has(hand)) {
+                        assignedHand = hand;
             break;
           }
         }
@@ -95,7 +102,7 @@ export const onUserCreated = onDocumentCreated("users/{userId}",
           transaction.set(snapshot.ref, {
             fullName: finalName, 
             currentLocation: finalLocation, // Updates to the safe/corrected location
-            handNumber: 0,
+                        handNumber: null,
             status: "waiting_list",
           }, { merge: true });
         } else {
@@ -114,6 +121,62 @@ export const onUserCreated = onDocumentCreated("users/{userId}",
       logger.error("Transaction failed critically: ", error);
     }
   }
+);
+
+/**
+ * Trigger: Fires when a new location document is created.
+ * Purpose: Automatically assigns the first free angle from [0, 90, 180, 270].
+ */
+export const onLocationCreated = onDocumentCreated("locations/{locationId}",
+    async (event) => {
+        const snapshot = event.data;
+        if (!snapshot) {
+            logger.log("No data associated with this event");
+            return;
+        }
+
+        const locationId = event.params.locationId;
+
+        try {
+            await db.runTransaction(async (transaction) => {
+                const locationsSnapshot = await transaction.get(db.collection("locations"));
+                const takenAngles = new Set<number>();
+
+                locationsSnapshot.forEach((doc) => {
+                    const docData = doc.data();
+                    const existingAngle = docData?.angle;
+
+                    if (
+                        doc.id !== locationId &&
+                        typeof existingAngle === "number" &&
+                        [0, 90, 180, 270].includes(existingAngle)
+                    ) {
+                        takenAngles.add(existingAngle);
+                    }
+                });
+
+                let assignedAngle: number | null = null;
+                for (const angle of [0, 90, 180, 270]) {
+                    if (!takenAngles.has(angle)) {
+                        assignedAngle = angle;
+                        break;
+                    }
+                }
+
+                if (assignedAngle === null) {
+                    logger.warn(`No free angle slot for location ${locationId}. Setting angle to null.`);
+                } else {
+                    logger.log(`Assigning angle ${assignedAngle} to location ${locationId}`);
+                }
+
+                transaction.set(snapshot.ref, {
+                    angle: assignedAngle,
+                }, { merge: true });
+            });
+        } catch (error) {
+            logger.error("Failed to auto-assign location angle:", error);
+        }
+    }
 );
 
 
@@ -265,7 +328,7 @@ export const onUserDeleted = onDocumentDeleted("users/{userId}", async (event) =
         }
 
         // --- 3. Cloud Storage Cleanup: Storage Orphan Prevention ---
-        const bucket = admin.storage().bucket();
+        const bucket = getStorage().bucket();
         const userAudioFolder = `audio_bites/${userId}/`;
 
         // Delete all physical audio files stored under this user's unique folder
@@ -608,7 +671,7 @@ export const checkAndPromptMissingUpdates = onSchedule(
                     };
 
                     // Queue the push notification sending process
-                    notificationsToPromise.push(admin.messaging().send(message));
+                    notificationsToPromise.push(getMessaging().send(message));
                     alertCount++;
                 } else if (needsAlert && !fcmToken) {
                     logger.warn(`User '${userName}' needs an alert but has no 'fcmToken' registered in their document.`);
@@ -747,7 +810,7 @@ export const cleanupExpiredVoiceMessages = onSchedule(
             }
 
             const batch = db.batch();
-            const bucket = admin.storage().bucket();
+            const bucket = getStorage().bucket();
             let deletedCount = 0;
 
             // Use a standard 'for...of' loop because we are doing asynchronous Storage deletions inside
@@ -854,7 +917,7 @@ export const clearVisualGreetings = onSchedule(
 
             // --- PART 2: Delete expired visual greetings from Firestore and Storage ---
             const greetingsSnapshot = await db.collection("visual_greetings").get();
-            const bucket = admin.storage().bucket();
+            const bucket = getStorage().bucket();
 
             if (!greetingsSnapshot.empty) {
                 // Loop to handle asynchronous Storage deletions
@@ -978,7 +1041,7 @@ export const sendDirectLocationPrompt = onCall(async (request) => {
             token: fcmToken
         };
 
-        await admin.messaging().send(message);
+        await getMessaging().send(message);
         logger.log(`Prompt sent successfully from '${senderName}' to user ID: '${targetUserId}'`);
 
         // --- 6. Update the Cooldown Timestamp ---
@@ -1124,7 +1187,7 @@ export const reportHardwareStatus = onRequest(async (request, response) => {
                         token: fcmToken
                     };
 
-                    await admin.messaging().send(message);
+                    await getMessaging().send(message);
                     logger.log("Critical Push Notification sent to Admin.");
                 } else {
                     logger.warn("Admin user found, but no FCM token is registered to send the alert.");

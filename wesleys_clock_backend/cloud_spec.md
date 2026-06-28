@@ -14,7 +14,7 @@ This document serves as the **Single Source of Truth (SSOT)** for the Cloud Func
   | :--- | :--- | :--- |
   | `uid` | `string` | Unique user ID. |
   | `name` | `string` | Display name of the user (e.g., "Dad", "Mom"). |
-  | `handNumber` | `number` \| `null` | Assigned clock hand (1, 2, 3, or 4). `null` if unassigned. |
+  | `handNumber` | `number` \| `null` | Assigned clock hand (0, 1, 2, or 3). `null` if unassigned. |
   | `currentLocation` | `string` | Location name (e.g., "Home", "Work", "Unknown", "Stale"). |
   | `targetAngle` | `number` | Calculated motor angle (0–360) corresponding to `currentLocation`. |
   | `displayGreetingUrl` | `string` \| `null` | URL to a doodle/avatar image to display on LCD. |
@@ -74,12 +74,23 @@ This document serves as the **Single Source of Truth (SSOT)** for the Cloud Func
 * **Trigger**: A new user registers via Flutter.
 * **Logic**:
   1. Runs inside a **Firestore Transaction** to prevent race conditions.
-  2. Queries all current documents in `/users` to see which `handNumber` values (1, 2, 3, 4) are currently assigned.
-  3. Allocates the first available number (e.g., if 1 and 2 are taken, assigns 3).
+  2. Queries all current documents in `/users` to see which `handNumber` values (0, 1, 2, 3) are currently assigned.
+  3. Allocates the first available number from `[0, 1, 2, 3]`.
   4. If all 4 hands are occupied, assigns `null` and logs a warning.
   5. Updates `/users/{uid}` with the selected `handNumber`.
+  6. The user cannot choose `handNumber`; assignment is always server-side.
 
-#### 2. `onUserLocationChanged` (Document Update Trigger)
+#### 2. `onLocationCreated` (Document Create Trigger)
+* **Path**: `/locations/{locId}`
+* **Trigger**: Admin creates a new landmark.
+* **Logic**:
+  1. Runs inside a **Firestore Transaction** to prevent race conditions.
+  2. Queries all current documents in `/locations` to see which `angle` values from `[0, 90, 180, 270]` are already assigned.
+  3. Allocates the first available angle from `[0, 90, 180, 270]`.
+  4. If all 4 angles are occupied, assigns `null` and logs a warning.
+  5. The admin/user cannot choose the angle; assignment is always server-side.
+
+#### 3. `onUserLocationChanged` (Document Update Trigger)
 * **Path**: `/users/{uid}`
 * **Trigger**: `currentLocation` or GPS coordinates change.
 * **Logic**:
@@ -90,7 +101,7 @@ This document serves as the **Single Source of Truth (SSOT)** for the Cloud Func
   5. If not found (unrecognized place), sets `targetAngle` to `0` (default) and updates `currentLocation` to `"Unknown"`.
   6. **Dynamic Greeting Playback Trigger**: Checks if the new location is `"Home"`. If yes, triggers `triggerQueuedMessagesOnArrival(uid)`.
 
-#### 3. `onUserDeleted` (Document Delete Trigger)
+#### 4. `onUserDeleted` (Document Delete Trigger)
 * **Path**: `/users/{uid}`
 * **Trigger**: Admin deletes a user.
 * **Logic**:
@@ -98,7 +109,7 @@ This document serves as the **Single Source of Truth (SSOT)** for the Cloud Func
   2. Deletes all document records in `/voice_messages` where `senderId == uid` or `recipientId == uid`.
   3. Frees the `handNumber` associated with the user, making it instantly available for the next registration.
 
-#### 4. `onLocationDeleted` (Document Delete Trigger)
+#### 5. `onLocationDeleted` (Document Delete Trigger)
 * **Path**: `/locations/{locId}`
 * **Trigger**: Admin removes a landmark.
 * **Logic**:
@@ -108,7 +119,7 @@ This document serves as the **Single Source of Truth (SSOT)** for the Cloud Func
      * `currentLocation` ➔ `"Unknown"`
      * `targetAngle` ➔ `0`
 
-#### 5. `onLocationUpdated` (Document Update Trigger)
+#### 6. `onLocationUpdated` (Document Update Trigger)
 * **Path**: `/locations/{locId}`
 * **Trigger**: Admin changes a location's angle or name.
 * **Logic**:
@@ -116,7 +127,7 @@ This document serves as the **Single Source of Truth (SSOT)** for the Cloud Func
   2. If the `angle` changed, queries all users whose `currentLocation` matches the modified landmark.
   3. Updates their `targetAngle` in real-time, causing the clock motors to synchronize immediately.
 
-#### 6. `onVoiceMessageCreated` (Document Create Trigger)
+#### 7. `onVoiceMessageCreated` (Document Create Trigger)
 * **Path**: `/voice_messages/{msgId}`
 * **Trigger**: A user records a voice message.
 * **Logic**:
@@ -128,7 +139,7 @@ This document serves as the **Single Source of Truth (SSOT)** for the Cloud Func
   5. If the target recipient is away:
      * Updates status to `"queued"`.
 
-#### 7. `onVisualGreetingCreated` (Document Create Trigger)
+#### 8. `onVisualGreetingCreated` (Document Create Trigger)
 * **Path**: `/visual_greetings/{greetingId}`
 * **Trigger**: User uploads a doodle / sketch.
 * **Logic**:

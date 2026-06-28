@@ -50,6 +50,20 @@ class _LoginScreenState extends State<LoginScreen> {
       // Fetch isAdmin flag from Firestore
       final uid = FirebaseAuth.instance.currentUser!.uid;
       final doc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+      if (!doc.exists) {
+        await FirebaseAuth.instance.signOut();
+        if (!mounted) {
+          return;
+        }
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('This account is no longer active.'),
+          ),
+        );
+        return;
+      }
+
       final isAdmin = doc.data()?['isAdmin'] == true;
 
       if (!mounted) {

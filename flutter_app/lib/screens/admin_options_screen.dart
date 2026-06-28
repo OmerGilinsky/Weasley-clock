@@ -26,6 +26,8 @@ class AdminOptionsScreen extends StatefulWidget {
 
 class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
   final ImagePicker _imagePicker = ImagePicker();
+  static const int _maxManagedUsers = 4;
+  static const int _maxLocations = 4;
   static const double _proximityRadiusMeters = 10;
   Timer? _proximityTimer;
   bool _isCheckingProximity = false;
@@ -209,6 +211,103 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
       default:
         return fallback;
     }
+  }
+
+  bool _isEspUserRecord(Map<String, dynamic> data, String docId) {
+    final candidates = <String>[
+      docId,
+      _readFirstStringField(data, const ['role']) ?? '',
+      _readFirstStringField(data, const ['type']) ?? '',
+      _readFirstStringField(data, const ['deviceType']) ?? '',
+      _readFirstStringField(data, const ['name', 'displayName', 'fullName']) ?? '',
+      _readFirstStringField(data, const ['email', 'mail']) ?? '',
+    ].map((value) => value.toLowerCase()).toList();
+
+    return candidates.any(
+      (value) =>
+          value.contains('esp') ||
+          value.contains('hardware') ||
+          value.contains('device'),
+    );
+  }
+
+  Future<List<_ManagedUser>> _fetchManagedUsers({bool excludeEsp = false}) async {
+    final snapshot =
+        await FirebaseFirestore.instance.collection('users').get();
+    final currentUid = FirebaseAuth.instance.currentUser?.uid;
+    final currentEmail = FirebaseAuth.instance.currentUser?.email?.trim();
+
+    final users = <_ManagedUser>[];
+    for (final doc in snapshot.docs) {
+      final data = doc.data();
+      final isEspUser = _isEspUserRecord(data, doc.id);
+      if (excludeEsp && isEspUser) {
+        continue;
+      }
+
+      final resolvedUid = _readFirstStringField(data, const [
+            'uid',
+            'userUid',
+            'authUid',
+          ]) ??
+          doc.id;
+      final name = _readFirstStringField(data, const [
+        'name',
+        'displayName',
+        'fullName',
+        'username',
+        'userName',
+      ]);
+      final email = _readFirstStringField(data, const ['email', 'mail']) ??
+          (resolvedUid == currentUid ? currentEmail : null);
+      final displayName = (name != null && name.isNotEmpty)
+          ? name
+          : (email != null && email.isNotEmpty)
+              ? email
+              : 'Unknown user';
+
+      users.add(
+        _ManagedUser(
+          docId: doc.id,
+          uid: resolvedUid,
+          displayName: displayName,
+          email: email,
+          isEspUser: isEspUser,
+        ),
+      );
+    }
+
+    users.sort(
+      (a, b) => a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase()),
+    );
+    return users;
+  }
+
+  Future<List<_ManagedLocation>> _fetchManagedLocations() async {
+    final snapshot = await FirebaseFirestore.instance
+        .collection('locations')
+        .orderBy('locationName')
+        .get();
+
+    final locations = <_ManagedLocation>[];
+    for (final doc in snapshot.docs) {
+      final data = doc.data();
+      final name = data['locationName'];
+      if (name is! String || name.trim().isEmpty) {
+        continue;
+      }
+
+      locations.add(
+        _ManagedLocation(
+          docId: doc.id,
+          name: name.trim(),
+          imageUrl: data['imageUrl'] as String?,
+          soundUrl: data['soundUrl'] as String?,
+        ),
+      );
+    }
+
+    return locations;
   }
 
   Future<_PickedUploadFile?> _pickImageFromSource(ImageSource source) async {
@@ -414,17 +513,9 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
   }
 
   Future<List<String>> _fetchLocationNames() async {
-    final snapshot = await FirebaseFirestore.instance
-        .collection('locations')
-        .orderBy('locationName')
-        .get();
-
     final names = <String>{};
-    for (final doc in snapshot.docs) {
-      final name = doc.data()['locationName'];
-      if (name is String && name.trim().isNotEmpty) {
-        names.add(name.trim());
-      }
+    for (final location in await _fetchManagedLocations()) {
+      names.add(location.name);
     }
 
     return names.toList()..sort();
@@ -468,6 +559,110 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
             FilledButton(
               onPressed: () => Navigator.pop(context, selected),
               child: const Text('Update'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<_ManagedLocation?> _showManagedLocationPicker(
+    List<_ManagedLocation> locations, {
+    required String title,
+    required String confirmLabel,
+  }) {
+    String selectedId = locations.first.docId;
+
+    return showDialog<_ManagedLocation>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(title),
+          content: DropdownButtonFormField<String>(
+            initialValue: selectedId,
+            items: locations
+                .map(
+                  (location) => DropdownMenuItem<String>(
+                    value: location.docId,
+                    child: Text(location.name),
+                  ),
+                )
+                .toList(),
+            onChanged: (value) {
+              if (value != null) {
+                setDialogState(() {
+                  selectedId = value;
+                });
+              }
+            },
+            decoration: const InputDecoration(
+              labelText: 'Choose location',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(
+                context,
+                locations.firstWhere((location) => location.docId == selectedId),
+              ),
+              child: Text(confirmLabel),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<_ManagedUser?> _showManagedUserPicker(
+    List<_ManagedUser> users, {
+    required String title,
+    required String confirmLabel,
+  }) {
+    String selectedId = users.first.docId;
+
+    return showDialog<_ManagedUser>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(title),
+          content: DropdownButtonFormField<String>(
+            initialValue: selectedId,
+            items: users
+                .map(
+                  (user) => DropdownMenuItem<String>(
+                    value: user.docId,
+                    child: Text(user.displayName),
+                  ),
+                )
+                .toList(),
+            onChanged: (value) {
+              if (value != null) {
+                setDialogState(() {
+                  selectedId = value;
+                });
+              }
+            },
+            decoration: const InputDecoration(
+              labelText: 'Choose user',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(
+                context,
+                users.firstWhere((user) => user.docId == selectedId),
+              ),
+              child: Text(confirmLabel),
             ),
           ],
         ),
@@ -1045,7 +1240,159 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
     }
   }
 
+  Future<void> _removeLocation() async {
+    try {
+      final locations = await _fetchManagedLocations();
+      if (!mounted) {
+        return;
+      }
+
+      if (locations.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No locations available to remove.')),
+        );
+        return;
+      }
+
+      final selectedLocation = await _showManagedLocationPicker(
+        locations,
+        title: 'Remove Location',
+        confirmLabel: 'Remove',
+      );
+      if (!mounted || selectedLocation == null) {
+        return;
+      }
+
+      final firestore = FirebaseFirestore.instance;
+      final usersSnapshot = await firestore.collection('users').get();
+      for (final userDoc in usersSnapshot.docs) {
+        final data = userDoc.data();
+        final existingLocationData = data['location'];
+        final updates = <String, dynamic>{};
+
+        if (existingLocationData is Map<String, dynamic> &&
+            existingLocationData.containsKey(selectedLocation.name)) {
+          final updatedLocationData =
+              Map<String, dynamic>.from(existingLocationData)
+                ..remove(selectedLocation.name);
+          updates['location'] = updatedLocationData.isEmpty
+              ? FieldValue.delete()
+              : updatedLocationData;
+        }
+
+        if (data['currentLocation'] == selectedLocation.name) {
+          updates['currentLocation'] = FieldValue.delete();
+        }
+
+        if (updates.isNotEmpty) {
+          await userDoc.reference.update(updates);
+        }
+      }
+
+      final storage = FirebaseStorage.instance;
+      for (final assetUrl in [selectedLocation.imageUrl, selectedLocation.soundUrl]) {
+        if (assetUrl == null || assetUrl.isEmpty) {
+          continue;
+        }
+        try {
+          await storage.refFromURL(assetUrl).delete();
+        } catch (_) {}
+      }
+
+      await firestore.collection('locations').doc(selectedLocation.docId).delete();
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Location "${selectedLocation.name}" removed.'),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Failed to remove location. Please try again.'),
+        ),
+      );
+    }
+  }
+
+  Future<void> _removeUser() async {
+    try {
+      final currentUid = FirebaseAuth.instance.currentUser?.uid;
+      final users = (await _fetchManagedUsers(excludeEsp: true))
+          .where((user) => user.uid != currentUid)
+          .toList();
+      if (!mounted) {
+        return;
+      }
+
+      if (users.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No other users are available to remove.'),
+          ),
+        );
+        return;
+      }
+
+      final selectedUser = await _showManagedUserPicker(
+        users,
+        title: 'Remove User',
+        confirmLabel: 'Remove',
+      );
+      if (!mounted || selectedUser == null) {
+        return;
+      }
+
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(selectedUser.docId)
+          .delete();
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('User "${selectedUser.displayName}" removed.'),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Failed to remove user. Please try again.'),
+        ),
+      );
+    }
+  }
+
   void _addUser() {
+    _fetchManagedUsers(excludeEsp: true).then((users) {
+      if (!mounted) {
+        return;
+      }
+
+      if (users.length >= _maxManagedUsers) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Only 4 users are allowed, excluding the ESP user.'),
+          ),
+        );
+        return;
+      }
+
     final formKey = GlobalKey<FormState>();
     final nameController = TextEditingController();
     final emailController = TextEditingController();
@@ -1164,6 +1511,27 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
 
                       FirebaseApp? tempApp;
                       try {
+                        final users =
+                            await _fetchManagedUsers(excludeEsp: true);
+                        if (users.length >= _maxManagedUsers) {
+                          if (dialogContext.mounted) {
+                            setDialogState(() {
+                              isSubmitting = false;
+                            });
+                          }
+                          if (!mounted) {
+                            return;
+                          }
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Only 4 users are allowed, excluding the ESP user.',
+                              ),
+                            ),
+                          );
+                          return;
+                        }
+
                         tempApp = await Firebase.initializeApp(
                           name:
                               'admin-create-${DateTime.now().microsecondsSinceEpoch}',
@@ -1258,9 +1626,22 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
       emailController.dispose();
       passwordController.dispose();
     });
+    });
   }
 
   void _addLocation() {
+    _fetchManagedLocations().then((locations) {
+      if (!mounted) {
+        return;
+      }
+
+      if (locations.length >= _maxLocations) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Only 4 locations are allowed.')),
+        );
+        return;
+      }
+
     final formKey = GlobalKey<FormState>();
     final locationController = TextEditingController();
     _PickedUploadFile? imageFile;
@@ -1385,6 +1766,24 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
                       });
 
                       final locationName = locationController.text.trim();
+                      final managedLocations = await _fetchManagedLocations();
+                      if (managedLocations.length >= _maxLocations) {
+                        if (dialogContext.mounted) {
+                          setDialogState(() {
+                            isSubmitting = false;
+                          });
+                        }
+                        if (!mounted) {
+                          return;
+                        }
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Only 4 locations are allowed.'),
+                          ),
+                        );
+                        return;
+                      }
+
                       final existingLocation = await FirebaseFirestore.instance
                           .collection('locations')
                           .where('locationName', isEqualTo: locationName)
@@ -1499,6 +1898,7 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
     ).whenComplete(() {
       locationController.dispose();
     });
+    });
   }
 
   Future<void> _logout() async {
@@ -1588,6 +1988,24 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
             ),
             const SizedBox(height: 16),
             ElevatedButton.icon(
+              onPressed: _removeUser,
+              icon: const Icon(Icons.person_remove),
+              label: const Text('Remove User'),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+              ),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: _removeLocation,
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('Remove Location'),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+              ),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
               onPressed: _promptSomeone,
               icon: const Icon(Icons.notifications_active_outlined),
               label: const Text('Prompt Someone'),
@@ -1641,6 +2059,36 @@ class _GpsCoordinate {
 
   final double latitude;
   final double longitude;
+}
+
+class _ManagedLocation {
+  const _ManagedLocation({
+    required this.docId,
+    required this.name,
+    required this.imageUrl,
+    required this.soundUrl,
+  });
+
+  final String docId;
+  final String name;
+  final String? imageUrl;
+  final String? soundUrl;
+}
+
+class _ManagedUser {
+  const _ManagedUser({
+    required this.docId,
+    required this.uid,
+    required this.displayName,
+    required this.email,
+    required this.isEspUser,
+  });
+
+  final String docId;
+  final String uid;
+  final String displayName;
+  final String? email;
+  final bool isEspUser;
 }
 
 class _PromptRecipient {
