@@ -18,6 +18,133 @@ const db = getFirestore();
 
 setGlobalOptions({maxInstances: 10});
 
+const ESP32_QUEUE_COLLECTION = "esp32_event_queue";
+const ESP32_QUEUE_STATE_DOC = db.collection("system_status").doc("esp32_queue_state");
+
+type Esp32QueueEventType =
+    | "play_picture"
+    | "play_voice"
+    | "update_display"
+    | "move_clock_hand"
+    | "reset_screen";
+
+interface QueueEventInput {
+    eventType: Esp32QueueEventType;
+    payload: Record<string, unknown>;
+    userId?: string;
+    handNumber?: number;
+    sourceCollection?: string;
+    sourceId?: string;
+}
+
+function readStringField(data: Record<string, unknown>, keys: string[]): string | null {
+    for (const key of keys) {
+        const value = data[key];
+        if (typeof value === "string" && value.trim() !== "") {
+            return value.trim();
+        }
+    }
+    return null;
+}
+
+function readNumericField(data: Record<string, unknown>, keys: string[]): number | null {
+    for (const key of keys) {
+        const value = data[key];
+        if (typeof value === "number" && Number.isFinite(value)) {
+            return value;
+        }
+    }
+    return null;
+}
+
+function readLocationScreen(data: Record<string, unknown>): string | number | null {
+    const screenKeys = ["screen", "screenId", "screenIndex", "display", "displayIndex", "lcd", "lcdScreen"];
+    for (const key of screenKeys) {
+        const value = data[key];
+        if (typeof value === "number" || typeof value === "string") {
+            return value;
+        }
+    }
+    return null;
+}
+
+function readLocationSoundUrl(data: Record<string, unknown>): string | null {
+    return readStringField(data, ["soundUrl", "locationSoundUrl", "audioUrl", "sound", "voiceUrl"]);
+}
+
+function readPictureUrl(data: Record<string, unknown>): string | null {
+    return readStringField(data, ["imageUrl", "greetingUrl", "mediaUrl", "displayGreetingUrl", "pictureUrl"]);
+}
+
+function readAudioUrl(data: Record<string, unknown>): string | null {
+    return readStringField(data, ["audioUrl", "mediaUrl", "voiceUrl", "user_voice"]);
+}
+
+async function enqueueEsp32Event(input: QueueEventInput): Promise<string> {
+    const eventRef = db.collection(ESP32_QUEUE_COLLECTION).doc();
+
+    await db.runTransaction(async (transaction) => {
+        const stateSnapshot = await transaction.get(ESP32_QUEUE_STATE_DOC);
+        const lastSequence = stateSnapshot.data()?.lastSequence;
+        const nextSequence = typeof lastSequence === "number" ? lastSequence + 1 : 1;
+
+        const eventDoc: Record<string, unknown> = {
+            eventType: input.eventType,
+            payload: input.payload,
+            sequence: nextSequence,
+            status: "pending",
+            createdAt: FieldValue.serverTimestamp(),
+        };
+
+        if (input.userId) {
+            eventDoc.userId = input.userId;
+        }
+        if (typeof input.handNumber === "number") {
+            eventDoc.handNumber = input.handNumber;
+        }
+        if (input.sourceCollection) {
+            eventDoc.sourceCollection = input.sourceCollection;
+        }
+        if (input.sourceId) {
+            eventDoc.sourceId = input.sourceId;
+        }
+
+        transaction.set(ESP32_QUEUE_STATE_DOC, {
+            lastSequence: nextSequence,
+            updatedAt: FieldValue.serverTimestamp(),
+        }, {merge: true});
+
+        transaction.set(eventRef, eventDoc);
+    });
+
+    logger.log(`Queued ESP32 event '${input.eventType}' as ${eventRef.id}`);
+    return eventRef.id;
+}
+
+async function findUserByMessageData(messageData: Record<string, unknown>) {
+    const targetUserId = readStringField(messageData, ["targetUserId", "recipientId", "userId"]);
+    if (targetUserId && targetUserId !== "all") {
+        const userSnapshot = await db.collection("users").doc(targetUserId).get();
+        if (userSnapshot.exists) {
+            return {id: userSnapshot.id, data: userSnapshot.data() as Record<string, unknown>};
+        }
+    }
+
+    const targetUserName = readStringField(messageData, ["targetUserName", "recipientName", "fullName"]);
+    if (targetUserName) {
+        const usersSnapshot = await db.collection("users")
+            .where("fullName", "==", targetUserName)
+            .limit(1)
+            .get();
+        if (!usersSnapshot.empty) {
+            const userDoc = usersSnapshot.docs[0];
+            return {id: userDoc.id, data: userDoc.data() as Record<string, unknown>};
+        }
+    }
+
+    return null;
+}
+
 /**
  * Trigger: Fires when a new user document is created
  */
@@ -218,19 +345,22 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
     try {
         // --- PART 1: Validate Location and Update targetAngle ---
         const locationsRef = db.collection("locations");
-        const snapshot = await locationsRef.where("locationName", "==", afterLocation).get();
+        const snapshot = await locationsRef.where("locationName", "==", afterLocation).limit(1).get();
 
         let targetAngle = 0; 
         let finalLocation = afterLocation; // Assume valid until proven otherwise
+        let locationDataForQueue: Record<string, unknown> | null = null;
 
         if (snapshot.empty) {
             // FIX: If location is not in the list, force it to 'Unknown Location'
             logger.warn(`Location '${afterLocation}' not found in locations collection. Reverting to 'Unknown Location'.`);
             finalLocation = "Unknown Location"; 
         } else {
-            const locationDoc = snapshot.docs[0].data();
-            if (locationDoc.angle !== undefined) {
-                targetAngle = locationDoc.angle;
+            const locationDoc = snapshot.docs[0].data() as Record<string, unknown>;
+            locationDataForQueue = locationDoc;
+            const locationAngle = readNumericField(locationDoc, ["angle"]);
+            if (locationAngle !== null) {
+                targetAngle = locationAngle;
                 logger.log(`Found location '${afterLocation}' with angle ${targetAngle}`);
             } else {
                 logger.warn(`Location '${afterLocation}' found but is missing 'angle'. Using 0.`);
@@ -244,6 +374,73 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
         }, { merge: true });
 
         logger.log(`Successfully updated user ${event.params.userId} - Location: '${finalLocation}', Angle: ${targetAngle}`);
+
+        const afterDataMap = afterData as Record<string, unknown>;
+        const userId = event.params.userId;
+        const handNumber = readNumericField(afterDataMap, ["handNumber"]);
+        const fallbackScreen = handNumber !== null ? handNumber : undefined;
+
+        if (finalLocation !== "Unknown Location" && locationDataForQueue) {
+            const screen = readLocationScreen(locationDataForQueue) ?? fallbackScreen;
+            const locationSoundUrl = readLocationSoundUrl(locationDataForQueue);
+            const userVoiceUrl = readAudioUrl(afterDataMap);
+
+            if (locationSoundUrl && userVoiceUrl) {
+                await enqueueEsp32Event({
+                    eventType: "play_voice",
+                    userId,
+                    handNumber: handNumber === null ? undefined : handNumber,
+                    payload: {
+                        screen,
+                        audioUrl: locationSoundUrl,
+                        source: "location_sound",
+                        locationName: finalLocation,
+                    },
+                    sourceCollection: "users",
+                    sourceId: userId,
+                });
+
+                await enqueueEsp32Event({
+                    eventType: "play_voice",
+                    userId,
+                    handNumber: handNumber === null ? undefined : handNumber,
+                    payload: {
+                        screen,
+                        audioUrl: userVoiceUrl,
+                        source: "user_voice",
+                        locationName: finalLocation,
+                    },
+                    sourceCollection: "users",
+                    sourceId: userId,
+                });
+            }
+
+            await enqueueEsp32Event({
+                eventType: "move_clock_hand",
+                userId,
+                handNumber: handNumber === null ? undefined : handNumber,
+                payload: {
+                    handNumber,
+                    angle: targetAngle,
+                    locationName: finalLocation,
+                },
+                sourceCollection: "users",
+                sourceId: userId,
+            });
+
+            await enqueueEsp32Event({
+                eventType: "update_display",
+                userId,
+                handNumber: handNumber === null ? undefined : handNumber,
+                payload: {
+                    screen,
+                    pictureUrl: readPictureUrl(afterDataMap),
+                    text: finalLocation,
+                },
+                sourceCollection: "users",
+                sourceId: userId,
+            });
+        }
 
         // --- PART 2: Trigger Queued Messages On Arrival ---
         // Only trigger if they successfully arrived HOME
@@ -357,8 +554,9 @@ export const onLocationDeleted = onDocumentDeleted("locations/{locationId}", asy
     }
 
     // Extract the internal location name (e.g., "WORK") from the deleted document data
-    const deletedLocationData = snapshot.data();
+    const deletedLocationData = snapshot.data() as Record<string, unknown>;
     const deletedLocationName = deletedLocationData?.locationName; 
+    const deletedLocationScreen = readLocationScreen(deletedLocationData);
 
     if (!deletedLocationName) {
         logger.warn(`The deleted document '${event.params.locationId}' did not contain a 'locationName' field. Cleanup aborted.`);
@@ -382,18 +580,37 @@ export const onLocationDeleted = onDocumentDeleted("locations/{locationId}", asy
         // 2. Initialize a Write Batch to perform multiple updates efficiently
         const batch = db.batch();
 
-        usersSnapshot.docs.forEach((doc) => {
+                const enqueuePromises: Promise<string>[] = [];
+
+                usersSnapshot.docs.forEach((doc) => {
             logger.log(`Preparing location reset for user ID: ${doc.id}`);
+                        const userData = doc.data() as Record<string, unknown>;
+                        const handNumber = readNumericField(userData, ["handNumber"]);
             
             // Update the user fields to default values as specified in User Story 3
             batch.update(doc.ref, {
                 currentLocation: "Unknown Location", // Set status to unknown since the location no longer exists
                 targetAngle: 0                       // Reset motor target angle to 0 (hand pointing straight up)
             });
+
+                        enqueuePromises.push(
+                            enqueueEsp32Event({
+                                eventType: "reset_screen",
+                                userId: doc.id,
+                                handNumber: handNumber === null ? undefined : handNumber,
+                                payload: {
+                                    screen: deletedLocationScreen ?? handNumber,
+                                    locationName: deletedLocationName,
+                                },
+                                sourceCollection: "locations",
+                                sourceId: event.params.locationId,
+                            })
+                        );
         });
 
         // 3. Commit the batch write operation to Firestore
         await batch.commit();
+                await Promise.all(enqueuePromises);
         logger.log(`Successfully updated ${usersSnapshot.size} users following the deletion of '${deletedLocationName}'.`);
 
     } catch (error) {
@@ -486,7 +703,7 @@ export const onVoiceMessageCreated = onDocumentCreated("voice_messages/{messageI
         return;
     }
 
-    const messageData = snapshot.data();
+    const messageData = snapshot.data() as Record<string, unknown>;
     
     const targetUserName = messageData?.targetUserName || messageData?.recipientName; 
     
@@ -540,6 +757,26 @@ export const onVoiceMessageCreated = onDocumentCreated("voice_messages/{messageI
         await snapshot.ref.update({
             status: newStatus
         });
+
+        const targetUser = await findUserByMessageData(messageData);
+        const handNumber = targetUser ? readNumericField(targetUser.data, ["handNumber"]) : null;
+        const audioUrl = readAudioUrl(messageData);
+
+        if (audioUrl) {
+            await enqueueEsp32Event({
+                eventType: "play_voice",
+                userId: targetUser ? targetUser.id : undefined,
+                handNumber: handNumber === null ? undefined : handNumber,
+                payload: {
+                    audioUrl,
+                    messageId: event.params.messageId,
+                    targetUserId: targetUser ? targetUser.id : null,
+                    shouldPlayImmediately,
+                },
+                sourceCollection: "voice_messages",
+                sourceId: event.params.messageId,
+            });
+        }
         
         logger.log(`Successfully updated voice message ${event.params.messageId} status to '${newStatus}'`);
 
@@ -554,6 +791,86 @@ export const onVoiceMessageCreated = onDocumentCreated("voice_messages/{messageI
  * Purpose: Finds the relevant user by NAME, logs their location, and updates their displayGreetingUrl 
  * so the physical LCD on the clock can download and show the image.
  */
+async function processVisualGreeting(
+    greetingId: string,
+    sourceCollection: string,
+    greetingData: Record<string, unknown>
+) {
+        const targetUserId = readStringField(greetingData, ["targetUserId"]);
+        const targetUserName = readStringField(greetingData, ["targetUserName", "recipientName"]);
+        const imageUrl = readPictureUrl(greetingData);
+
+        if (!imageUrl || (!targetUserId && !targetUserName)) {
+            logger.warn(`Visual greeting ${greetingId} missing target or image URL. Aborting execution.`);
+            return;
+        }
+
+        let userDocId: string | null = null;
+        let userData: Record<string, unknown> | null = null;
+
+        if (targetUserId) {
+            const userSnapshot = await db.collection("users").doc(targetUserId).get();
+            if (userSnapshot.exists) {
+                userDocId = userSnapshot.id;
+                userData = userSnapshot.data() as Record<string, unknown>;
+            }
+        }
+
+        if (!userDocId && targetUserName) {
+            const usersSnapshot = await db.collection("users")
+                .where("fullName", "==", targetUserName)
+                .limit(1)
+                .get();
+
+            if (!usersSnapshot.empty) {
+                userDocId = usersSnapshot.docs[0].id;
+                userData = usersSnapshot.docs[0].data() as Record<string, unknown>;
+            }
+        }
+
+        if (!userDocId || !userData) {
+            logger.warn(`Target user for visual greeting ${greetingId} not found.`);
+            return;
+        }
+
+        const currentLocation = readStringField(userData, ["currentLocation"]);
+        const handNumber = readNumericField(userData, ["handNumber"]);
+        let screen: string | number | null = handNumber;
+
+        if (currentLocation && currentLocation !== "Unknown Location") {
+            const locationSnapshot = await db.collection("locations")
+                .where("locationName", "==", currentLocation)
+                .limit(1)
+                .get();
+            if (!locationSnapshot.empty) {
+                const locationData = locationSnapshot.docs[0].data() as Record<string, unknown>;
+                const locationScreen = readLocationScreen(locationData);
+                if (locationScreen !== null) {
+                    screen = locationScreen;
+                }
+            }
+        }
+
+        await db.collection("users").doc(userDocId).set({
+            displayGreetingUrl: imageUrl,
+        }, {merge: true});
+
+        await enqueueEsp32Event({
+            eventType: "play_picture",
+            userId: userDocId,
+            handNumber: handNumber === null ? undefined : handNumber,
+            payload: {
+                screen,
+                pictureUrl: imageUrl,
+                locationName: currentLocation ?? "Unknown Location",
+            },
+            sourceCollection,
+            sourceId: greetingId,
+        });
+
+        logger.log(`Queued play_picture event for user '${userDocId}' from ${sourceCollection}/${greetingId}.`);
+}
+
 export const onVisualGreetingCreated = onDocumentCreated("visual_greetings/{greetingId}", async (event) => {
     const snapshot = event.data;
     if (!snapshot) {
@@ -561,49 +878,33 @@ export const onVisualGreetingCreated = onDocumentCreated("visual_greetings/{gree
         return;
     }
 
-    const greetingData = snapshot.data();
-    
-    // Locate the target user by NAME and the Storage URL of the drawing
-    const targetUserName = greetingData?.targetUserName || greetingData?.recipientName; 
-    const imageUrl = greetingData?.imageUrl || greetingData?.greetingUrl;
+        try {
+            await processVisualGreeting(
+                event.params.greetingId,
+                "visual_greetings",
+                snapshot.data() as Record<string, unknown>
+            );
+        } catch (error) {
+            logger.error("Error processing visual greeting:", error);
+        }
+});
 
-    if (!targetUserName || !imageUrl) {
-        logger.warn(`Visual greeting ${event.params.greetingId} is missing targetUserName or imageUrl. Aborting execution.`);
-        return;
-    }
-
-    logger.log(`Processing new visual greeting for user name: ${targetUserName}`);
-
-    try {
-        // Query the users collection to find the document with the matching fullName
-        const usersSnapshot = await db.collection("users")
-            .where("fullName", "==", targetUserName)
-            .limit(1)
-            .get();
-
-        if (usersSnapshot.empty) {
-            logger.warn(`Target user with name '${targetUserName}' not found in database.`);
+export const onVisualMessageCreated = onDocumentCreated("visual_messages/{messageId}", async (event) => {
+        const snapshot = event.data;
+        if (!snapshot) {
+            logger.error("No data associated with the new visual message event");
             return;
         }
 
-        // Get the first matching user document
-        const userDoc = usersSnapshot.docs[0];
-        const userData = userDoc.data();
-        
-        // As per specifications: Check and log the user's current location
-        const currentLocation = userData?.currentLocation || "Unknown Location";
-        logger.log(`Target user '${targetUserName}' is currently at: '${currentLocation}'. Updating LCD screen data...`);
-
-        // Update the user's document with the new image path so the physical clock can pull it
-        await userDoc.ref.update({
-            displayGreetingUrl: imageUrl
-        });
-
-        logger.log(`Successfully updated displayGreetingUrl for user '${targetUserName}'. Clock LCD can now pull the image.`);
-
-    } catch (error) {
-        logger.error("Error processing visual greeting:", error);
-    }
+        try {
+            await processVisualGreeting(
+                event.params.messageId,
+                "visual_messages",
+                snapshot.data() as Record<string, unknown>
+            );
+        } catch (error) {
+            logger.error("Error processing visual message:", error);
+        }
 });
 
 /**
@@ -1206,5 +1507,102 @@ export const reportHardwareStatus = onRequest(async (request, response) => {
     } catch (error) {
         logger.error("Error processing hardware status report:", error);
         response.status(500).json({ error: "Internal Server Error" });
+    }
+});
+
+/**
+ * HTTP Request Function: popNextEsp32Event
+ * Trigger: ESP32 calls this endpoint to claim the next queue event in order.
+ * Purpose: Pops one event at a time by sequence and marks it as processing.
+ */
+export const popNextEsp32Event = onRequest(async (request, response) => {
+    if (request.method !== "GET") {
+        response.status(405).json({error: "Method Not Allowed. Please use GET."});
+        return;
+    }
+
+    try {
+        const userId = typeof request.query.userId === "string" ? request.query.userId : null;
+        let query = db.collection(ESP32_QUEUE_COLLECTION)
+            .where("status", "==", "pending")
+            .orderBy("sequence", "asc")
+            .limit(1);
+
+        if (userId) {
+            query = query.where("userId", "==", userId);
+        }
+
+        const queueSnapshot = await query.get();
+        if (queueSnapshot.empty) {
+            response.status(200).json({status: "empty"});
+            return;
+        }
+
+        const eventDoc = queueSnapshot.docs[0];
+        await db.runTransaction(async (transaction) => {
+            const latestSnapshot = await transaction.get(eventDoc.ref);
+            const latestStatus = latestSnapshot.data()?.status;
+            if (latestStatus !== "pending") {
+                throw new Error("Event already claimed");
+            }
+
+            transaction.update(eventDoc.ref, {
+                status: "processing",
+                claimedAt: FieldValue.serverTimestamp(),
+            });
+        });
+
+        const eventData = eventDoc.data();
+        response.status(200).json({
+            status: "ok",
+            event: {
+                id: eventDoc.id,
+                ...eventData,
+            },
+        });
+    } catch (error) {
+        logger.error("Error while popping next ESP32 event:", error);
+        response.status(500).json({error: "Internal Server Error"});
+    }
+});
+
+/**
+ * HTTP Request Function: completeEsp32Event
+ * Trigger: ESP32 calls this endpoint after handling an event.
+ * Purpose: Marks an event as done (or failed).
+ */
+export const completeEsp32Event = onRequest(async (request, response) => {
+    if (request.method !== "POST") {
+        response.status(405).json({error: "Method Not Allowed. Please use POST."});
+        return;
+    }
+
+    try {
+        const eventId = typeof request.body?.eventId === "string" ? request.body.eventId : null;
+        const wasSuccessful = request.body?.success !== false;
+        const errorMessage = typeof request.body?.errorMessage === "string" ? request.body.errorMessage : null;
+
+        if (!eventId) {
+            response.status(400).json({error: "Bad Request. Missing eventId."});
+            return;
+        }
+
+        const eventRef = db.collection(ESP32_QUEUE_COLLECTION).doc(eventId);
+        const eventSnapshot = await eventRef.get();
+        if (!eventSnapshot.exists) {
+            response.status(404).json({error: "Event not found."});
+            return;
+        }
+
+        await eventRef.set({
+            status: wasSuccessful ? "done" : "failed",
+            completedAt: FieldValue.serverTimestamp(),
+            lastError: errorMessage,
+        }, {merge: true});
+
+        response.status(200).json({status: "success"});
+    } catch (error) {
+        logger.error("Error while completing ESP32 event:", error);
+        response.status(500).json({error: "Internal Server Error"});
     }
 });
