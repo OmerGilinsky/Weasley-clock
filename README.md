@@ -1,6 +1,7 @@
-## XXXXX Project by :  
+## Weasley-clock Project by : Avigail Ben David & Omer
   
 ## Details about the project
+Weasley's Clock is an IoT-based physical grandfather clock inspired by the Harry Potter universe. It displays the real-time physical locations of family members using motorized clock hands (servos) and customized LCD screens. It also receives and plays recorded voice messages dynamically when family members arrive home. The system integrates a physical ESP32 microcontroller, a serverless Firebase backend (Cloud Functions, Firestore, Storage), and a Flutter mobile app.
  
 ## Folder description :
 * ESP32: source code for the esp side (firmware).
@@ -11,15 +12,20 @@
 * Assets: link to 3D printed parts, Audio files used in this project, Fritzing file for connection diagram (FZZ format) etc
 
 ## ESP32 SDK version used in this project: 
+ESP32 Arduino Core version 2.0.17 (using ESP32 Dev Module)
 
 ## Arduino/ESP32 libraries used in this project:
-* XXXX - version XXXXX
-* XXXX - version XXXXX
-* XXXX - version XXXXX
+* Firebase ESP Client - version 4.4.14 (by Mobizt)
+* ESP32Servo - version 1.1.8 (by Kevin Harrington)
+* ESP32-audioI2S - version 3.0.0 (by Wolle)
+* ArduinoJson - version 6.21.3 (by Benoit Blanchon)
+* Adafruit GFX Library & ST7789 Library
 
 ## Connection diagram:
+The connection diagrams and pin schematics for the SPI bus (SD Card and TFT Displays), I2S DAC, and MG995 servos are documented under the Documentation folder.
 
 ## Project Poster:
+Poster files can be found under the Assets / Documentation folders.
  
 This project is part of ICST - The Interdisciplinary Center for Smart Technologies, Taub Faculty of Computer Science, Technion
 https://icst.cs.technion.ac.il/
