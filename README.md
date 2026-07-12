@@ -1,7 +1,7 @@
-## Weasley-clock Project by : Avigail Ben David & Omer
+## Weasley-clock Project by : Avigail Ben David & Omer Gilinsky & Lital mirovoy
   
 ## Details about the project
-Weasley's Clock is an IoT-based physical grandfather clock inspired by the Harry Potter universe. It displays the real-time physical locations of family members using motorized clock hands (servos) and customized LCD screens. It also receives and plays recorded voice messages dynamically when family members arrive home. The system integrates a physical ESP32 microcontroller, a serverless Firebase backend (Cloud Functions, Firestore, Storage), and a Flutter mobile app.
+Weasley's Clock is an IoT-based physical grandfather clock inspired by the Harry Potter universe. It displays the real-time physical locations of family members using motorized clock hands (servos) and customized LCD screens. It also receives and plays recorded voice messages dynamically when family members arrive home. The system integrates a physical ESP32 microcontroller, a serverless Firebase backend (Cloud Functions, Firestore, Storage), and a Flutter web app.
  
 ## Folder description :
 * ESP32: source code for the esp side (firmware).
