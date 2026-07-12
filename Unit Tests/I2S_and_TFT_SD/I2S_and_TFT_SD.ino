@@ -14,7 +14,7 @@
 //I2C_GND   GND
 //I2C_LCK   RX2
 //I2C_DIN   TX2
-//I2C_BCK   D5
+//I2C_BCK   D19
 
 //SD_3V3    3V3
 //SD_CS     D15
@@ -36,7 +36,7 @@
 #define TFT_CS4   27
 
 #define I2S_DOUT  17
-#define I2S_BCLK  5
+#define I2S_BCLK  19
 #define I2S_LRC   16
 
 #define SD_CLK    25

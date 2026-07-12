@@ -1,27 +1,27 @@
-//TFT_GND   GND
-//TFT_VCC   3V3
-//TFT_SCL   D18
-//TFT_SDA   D23
-//TFT_RES   D4
-//TFT_DC    D2
-//TFT_CS1   D13
-//TFT_CS2   D12
-//TFT_CS3   D14
-//TFT_CS4   D27
-//TFT_BLK   3V3
+//TFT_GND         GND
+//TFT_VCC         3V3
+//TFT_SCL         D18
+//TFT_SDA         D23
+//TFT_RES         D4
+//TFT_DC          D2
+//TFT_CS1         D13
+//TFT_CS2         D12
+//TFT_CS3         D14
+//TFT_CS4         D27
+//TFT_BLK         3V3
 
-//I2S_VIN   3V3
-//I2C_GND   GND
-//I2C_LCK   RX2
-//I2C_DIN   TX2
-//I2C_BCK   D5
+//I2S_VIN         3V3
+//I2C_GND         GND
+//I2C_LCK         RX2
+//I2C_DIN         TX2
+//I2C_BCK         D5
 
-//SD_3V3    3V3
-//SD_CS     D15
-//SD_MOSI   D26
-//SD_CLK    D25
-//SD_MISO   D33
-//SD_GND    GND
+//SD_3V3          3V3
+//SD_CS           D15
+//SD_MOSI         D26
+//SD_CLK          D25
+//SD_MISO         D33
+//SD_GND          GND
 
 //servo_brown     GND
 //servo_red       external 5V
@@ -44,7 +44,7 @@
 #define TFT_CS4     27
 
 #define I2S_DOUT    17
-#define I2S_BCLK    5
+#define I2S_BCLK    19
 #define I2S_LRC     16
 
 #define SD_CLK      25
@@ -52,7 +52,7 @@
 #define SD_MOSI     26
 #define SD_CS       15
 
-#define servo_PWM1  19
+#define servo_PWM1  5
 #define servo_PWM2  21
 #define servo_PWM3  22
 #define servo_PWM4  32
@@ -107,14 +107,17 @@ void displays_and_servos(void* params) {
     targetDisplay(TFT_CS4);
     TJpgDec.drawFsJpg(0, 0, "/Perion.jpg", SD);
 
-    servoMotor1.write(centerServoAngle);
-    Serial.println("1 -> center");
-    vTaskDelay(pdMS_TO_TICKS(500));
-    servoMotor1.write(leftServoAngle);
-    Serial.println("1 -> left");
-    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("right -> 1");
     servoMotor1.write(rightServoAngle);
-    Serial.println("1 -> right");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("center -> 1");
+    servoMotor1.write(centerServoAngle);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("left -> 1");
+    servoMotor1.write(leftServoAngle);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("center -> 1");
+    servoMotor1.write(centerServoAngle);
     vTaskDelay(pdMS_TO_TICKS(500));
 
     Serial.println("Ellinia -> 1, Kerning -> 2, Perion -> 3, Henesys -> 4");
@@ -131,14 +134,17 @@ void displays_and_servos(void* params) {
     targetDisplay(TFT_CS4);
     TJpgDec.drawFsJpg(0, 0, "/Kerning.jpg", SD);
 
-    servoMotor2.write(centerServoAngle);
-    Serial.println("2 -> center");
-    vTaskDelay(pdMS_TO_TICKS(500));
-    servoMotor2.write(leftServoAngle);
-    Serial.println("2 -> left");
-    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("right -> 2");
     servoMotor2.write(rightServoAngle);
-    Serial.println("2 -> right");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("center -> 2");
+    servoMotor2.write(centerServoAngle);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("left -> 2");
+    servoMotor2.write(leftServoAngle);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("center -> 2");
+    servoMotor2.write(centerServoAngle);
     vTaskDelay(pdMS_TO_TICKS(500));
 
     Serial.println("Kerning -> 1, Perion -> 2, Henesys -> 3, Ellinia -> 4");
@@ -155,14 +161,17 @@ void displays_and_servos(void* params) {
     targetDisplay(TFT_CS4);
     TJpgDec.drawFsJpg(0, 0, "/Ellinia.jpg", SD);
 
-    servoMotor3.write(centerServoAngle);
-    Serial.println("3 -> center");
-    vTaskDelay(pdMS_TO_TICKS(500));
-    servoMotor3.write(leftServoAngle);
-    Serial.println("3 -> left");
-    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("right -> 3");
     servoMotor3.write(rightServoAngle);
-    Serial.println("3 -> right");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("center -> 3");
+    servoMotor3.write(centerServoAngle);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("left -> 3");
+    servoMotor3.write(leftServoAngle);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("center -> 3");
+    servoMotor3.write(centerServoAngle);
     vTaskDelay(pdMS_TO_TICKS(500));
 
     Serial.println("Perion -> 1, Henesys -> 2, Ellinia -> 3, Kerning -> 4");
@@ -179,14 +188,17 @@ void displays_and_servos(void* params) {
     targetDisplay(TFT_CS4);
     TJpgDec.drawFsJpg(0, 0, "/Henesys.jpg", SD);
 
-    servoMotor4.write(centerServoAngle);
-    Serial.println("4 -> center");
-    vTaskDelay(pdMS_TO_TICKS(500));
-    servoMotor4.write(leftServoAngle);
-    Serial.println("4 -> left");
-    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("right -> 4");
     servoMotor4.write(rightServoAngle);
-    Serial.println("4 -> right");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("center -> 4");
+    servoMotor4.write(centerServoAngle);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("left -> 4");
+    servoMotor4.write(leftServoAngle);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("center -> 4");
+    servoMotor4.write(centerServoAngle);
     vTaskDelay(pdMS_TO_TICKS(500));
   }
 }
@@ -200,9 +212,14 @@ void setup() {
   servoMotor4.attach(servo_PWM4);
 
   servoMotor1.write(centerServoAngle);
+  delay(500);
   servoMotor2.write(centerServoAngle);
+  delay(500);
   servoMotor3.write(centerServoAngle);
+  delay(500);
   servoMotor4.write(centerServoAngle);
+  delay(500);
+  Serial.println("Servos are set");
 
   SD_SPI.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
 
@@ -234,10 +251,14 @@ void setup() {
   TJpgDec.setSwapBytes(true);
   TJpgDec.setCallback(tft_output);
 
+  Serial.println("Displays are set");
+
   audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
   audio.setVolume(10);
   audio.connecttoFS(SD, "/Title.mp3");
   audio.setFileLoop(true);
+
+  Serial.println("Audio are set");
 
   xTaskCreatePinnedToCore(displays_and_servos, "displays_and_servos", STACK_SIZE, nullptr, 5, nullptr, 0);
 }
