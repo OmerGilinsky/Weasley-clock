@@ -57,14 +57,39 @@ function readNumericField(data: Record<string, unknown>, keys: string[]): number
     return null;
 }
 
-function readLocationScreen(data: Record<string, unknown>): string | number | null {
-    const screenKeys = ["screen", "screenId", "screenIndex", "display", "displayIndex", "lcd", "lcdScreen"];
-    for (const key of screenKeys) {
-        const value = data[key];
-        if (typeof value === "number" || typeof value === "string") {
-            return value;
+function normalizeScreenNumber(value: unknown): number | null {
+    if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 3) {
+        return value;
+    }
+
+    if (typeof value === "string") {
+        const parsed = Number.parseInt(value.trim(), 10);
+        if (Number.isInteger(parsed) && parsed >= 0 && parsed <= 3) {
+            return parsed;
         }
     }
+
+    return null;
+}
+
+function readLocationScreenNumber(data: Record<string, unknown>): number | null {
+    const screenKeys = ["screenNumber", "screen", "screenId", "screenIndex", "display", "displayIndex", "lcd", "lcdScreen"];
+    for (const key of screenKeys) {
+        const normalized = normalizeScreenNumber(data[key]);
+        if (normalized !== null) {
+            return normalized;
+        }
+    }
+
+    // Backward compatibility for old location docs that still store angles.
+    const legacyAngle = readNumericField(data, ["angle"]);
+    if (legacyAngle !== null) {
+        if (legacyAngle === 0) return 0;
+        if (legacyAngle === 90) return 1;
+        if (legacyAngle === 180) return 2;
+        if (legacyAngle === 270) return 3;
+    }
+
     return null;
 }
 
@@ -252,7 +277,7 @@ export const onUserCreated = onDocumentCreated("users/{userId}",
 
 /**
  * Trigger: Fires when a new location document is created.
- * Purpose: Automatically assigns the first free angle from [0, 90, 180, 270].
+ * Purpose: Automatically assigns the first free screen number from [0, 1, 2, 3].
  */
 export const onLocationCreated = onDocumentCreated("locations/{locationId}",
     async (event) => {
@@ -263,45 +288,61 @@ export const onLocationCreated = onDocumentCreated("locations/{locationId}",
         }
 
         const locationId = event.params.locationId;
+        let assignedScreenNumberForQueue: number | null = null;
 
         try {
             await db.runTransaction(async (transaction) => {
                 const locationsSnapshot = await transaction.get(db.collection("locations"));
-                const takenAngles = new Set<number>();
+                const takenScreenNumbers = new Set<number>();
 
                 locationsSnapshot.forEach((doc) => {
                     const docData = doc.data();
-                    const existingAngle = docData?.angle;
+                    const existingScreenNumber = readLocationScreenNumber(docData as Record<string, unknown>);
 
                     if (
                         doc.id !== locationId &&
-                        typeof existingAngle === "number" &&
-                        [0, 90, 180, 270].includes(existingAngle)
+                        typeof existingScreenNumber === "number" &&
+                        [0, 1, 2, 3].includes(existingScreenNumber)
                     ) {
-                        takenAngles.add(existingAngle);
+                        takenScreenNumbers.add(existingScreenNumber);
                     }
                 });
 
-                let assignedAngle: number | null = null;
-                for (const angle of [0, 90, 180, 270]) {
-                    if (!takenAngles.has(angle)) {
-                        assignedAngle = angle;
+                let assignedScreenNumber: number | null = null;
+                for (const screenNumber of [0, 1, 2, 3]) {
+                    if (!takenScreenNumbers.has(screenNumber)) {
+                        assignedScreenNumber = screenNumber;
                         break;
                     }
                 }
 
-                if (assignedAngle === null) {
-                    logger.warn(`No free angle slot for location ${locationId}. Setting angle to null.`);
+                if (assignedScreenNumber === null) {
+                    logger.warn(`No free screen slot for location ${locationId}. Setting screenNumber to null.`);
                 } else {
-                    logger.log(`Assigning angle ${assignedAngle} to location ${locationId}`);
+                    logger.log(`Assigning screenNumber ${assignedScreenNumber} to location ${locationId}`);
                 }
 
                 transaction.set(snapshot.ref, {
-                    angle: assignedAngle,
+                    screenNumber: assignedScreenNumber,
                 }, { merge: true });
+
+                assignedScreenNumberForQueue = assignedScreenNumber;
             });
+
+            if (assignedScreenNumberForQueue !== null) {
+                const createdLocationData = snapshot.data() as Record<string, unknown>;
+                await enqueueEsp32Event({
+                    eventType: "update_display",
+                    payload: {
+                        screenNumber: assignedScreenNumberForQueue,
+                        picture: readPictureUrl(createdLocationData),
+                    },
+                    sourceCollection: "locations",
+                    sourceId: locationId,
+                });
+            }
         } catch (error) {
-            logger.error("Failed to auto-assign location angle:", error);
+            logger.error("Failed to auto-assign location screen number:", error);
         }
     }
 );
@@ -310,7 +351,7 @@ export const onLocationCreated = onDocumentCreated("locations/{locationId}",
 
 /**
  * Trigger: Fires when an existing user document is updated.
- * Purpose 1: Detects location changes, fetches the matching physical clock angle, and updates targetAngle.
+ * Purpose 1: Detects location changes, fetches the matching location screen number, and updates targetScreenNumber.
  * Purpose 2: Trigger Queued Messages - Checks if the user arrived "HOME" and releases relevant pending messages.
  * NEW: Validates location against allowed locations and reverts to "Unknown Location" if invalid.
  */
@@ -337,17 +378,17 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
 
     // If the new location is empty, missing, or already "Unknown Location", handle gracefully and exit
     if (!afterLocation || afterLocation === "Unknown Location") {
-        logger.log("Location is empty or Unknown. Setting targetAngle to default (0).");
-        await change.after.ref.set({ targetAngle: 0, currentLocation: "Unknown Location" }, { merge: true });
+        logger.log("Location is empty or Unknown. Setting targetScreenNumber to default (0).");
+        await change.after.ref.set({ targetScreenNumber: 0, currentLocation: "Unknown Location" }, { merge: true });
         return;
     }
 
     try {
-        // --- PART 1: Validate Location and Update targetAngle ---
+        // --- PART 1: Validate Location and Update targetScreenNumber ---
         const locationsRef = db.collection("locations");
         const snapshot = await locationsRef.where("locationName", "==", afterLocation).limit(1).get();
 
-        let targetAngle = 0; 
+        let targetScreenNumber = 0;
         let finalLocation = afterLocation; // Assume valid until proven otherwise
         let locationDataForQueue: Record<string, unknown> | null = null;
 
@@ -358,22 +399,22 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
         } else {
             const locationDoc = snapshot.docs[0].data() as Record<string, unknown>;
             locationDataForQueue = locationDoc;
-            const locationAngle = readNumericField(locationDoc, ["angle"]);
-            if (locationAngle !== null) {
-                targetAngle = locationAngle;
-                logger.log(`Found location '${afterLocation}' with angle ${targetAngle}`);
+            const locationScreenNumber = readLocationScreenNumber(locationDoc);
+            if (locationScreenNumber !== null) {
+                targetScreenNumber = locationScreenNumber;
+                logger.log(`Found location '${afterLocation}' with screenNumber ${targetScreenNumber}`);
             } else {
-                logger.warn(`Location '${afterLocation}' found but is missing 'angle'. Using 0.`);
+                logger.warn(`Location '${afterLocation}' found but is missing a valid screen number. Using 0.`);
             }
         }
 
-        // Update both the angle AND the validated location (overwrites invalid locations)
+        // Update both the screen number and the validated location (overwrites invalid locations)
         await change.after.ref.set({ 
-            targetAngle: targetAngle,
+            targetScreenNumber: targetScreenNumber,
             currentLocation: finalLocation 
         }, { merge: true });
 
-        logger.log(`Successfully updated user ${event.params.userId} - Location: '${finalLocation}', Angle: ${targetAngle}`);
+        logger.log(`Successfully updated user ${event.params.userId} - Location: '${finalLocation}', Screen: ${targetScreenNumber}`);
 
         const afterDataMap = afterData as Record<string, unknown>;
         const userId = event.params.userId;
@@ -381,7 +422,7 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
         const fallbackScreen = handNumber !== null ? handNumber : undefined;
 
         if (finalLocation !== "Unknown Location" && locationDataForQueue) {
-            const screen = readLocationScreen(locationDataForQueue) ?? fallbackScreen;
+            const screen = readLocationScreenNumber(locationDataForQueue) ?? fallbackScreen;
             const locationSoundUrl = readLocationSoundUrl(locationDataForQueue);
             const userVoiceUrl = readAudioUrl(afterDataMap);
 
@@ -421,21 +462,8 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
                 handNumber: handNumber === null ? undefined : handNumber,
                 payload: {
                     handNumber,
-                    angle: targetAngle,
+                    screenNumber: targetScreenNumber,
                     locationName: finalLocation,
-                },
-                sourceCollection: "users",
-                sourceId: userId,
-            });
-
-            await enqueueEsp32Event({
-                eventType: "update_display",
-                userId,
-                handNumber: handNumber === null ? undefined : handNumber,
-                payload: {
-                    screen,
-                    pictureUrl: readPictureUrl(afterDataMap),
-                    text: finalLocation,
                 },
                 sourceCollection: "users",
                 sourceId: userId,
@@ -556,7 +584,7 @@ export const onLocationDeleted = onDocumentDeleted("locations/{locationId}", asy
     // Extract the internal location name (e.g., "WORK") from the deleted document data
     const deletedLocationData = snapshot.data() as Record<string, unknown>;
     const deletedLocationName = deletedLocationData?.locationName; 
-    const deletedLocationScreen = readLocationScreen(deletedLocationData);
+    const deletedLocationScreen = readLocationScreenNumber(deletedLocationData);
 
     if (!deletedLocationName) {
         logger.warn(`The deleted document '${event.params.locationId}' did not contain a 'locationName' field. Cleanup aborted.`);
@@ -571,47 +599,39 @@ export const onLocationDeleted = onDocumentDeleted("locations/{locationId}", asy
             .where("currentLocation", "==", deletedLocationName)
             .get();
 
-        // If no users are currently assigned to this location, exit early and log it
-        if (usersSnapshot.empty) {
-            logger.log(`No users were found with currentLocation == '${deletedLocationName}'. No updates needed.`);
-            return;
-        }
+        // 2. Update all affected users, if any
+        if (!usersSnapshot.empty) {
+            const batch = db.batch();
 
-        // 2. Initialize a Write Batch to perform multiple updates efficiently
-        const batch = db.batch();
+            usersSnapshot.docs.forEach((doc) => {
+                logger.log(`Preparing location reset for user ID: ${doc.id}`);
 
-                const enqueuePromises: Promise<string>[] = [];
-
-                usersSnapshot.docs.forEach((doc) => {
-            logger.log(`Preparing location reset for user ID: ${doc.id}`);
-                        const userData = doc.data() as Record<string, unknown>;
-                        const handNumber = readNumericField(userData, ["handNumber"]);
-            
-            // Update the user fields to default values as specified in User Story 3
-            batch.update(doc.ref, {
-                currentLocation: "Unknown Location", // Set status to unknown since the location no longer exists
-                targetAngle: 0                       // Reset motor target angle to 0 (hand pointing straight up)
+                batch.update(doc.ref, {
+                    currentLocation: "Unknown Location",
+                    targetScreenNumber: 0,
+                });
             });
 
-                        enqueuePromises.push(
-                            enqueueEsp32Event({
-                                eventType: "reset_screen",
-                                userId: doc.id,
-                                handNumber: handNumber === null ? undefined : handNumber,
-                                payload: {
-                                    screen: deletedLocationScreen ?? handNumber,
-                                    locationName: deletedLocationName,
-                                },
-                                sourceCollection: "locations",
-                                sourceId: event.params.locationId,
-                            })
-                        );
-        });
+            await batch.commit();
+            logger.log(`Successfully updated ${usersSnapshot.size} users following the deletion of '${deletedLocationName}'.`);
+        } else {
+            logger.log(`No users were found with currentLocation == '${deletedLocationName}'.`);
+        }
 
-        // 3. Commit the batch write operation to Firestore
-        await batch.commit();
-                await Promise.all(enqueuePromises);
-        logger.log(`Successfully updated ${usersSnapshot.size} users following the deletion of '${deletedLocationName}'.`);
+        // 3. Always queue display clear for the deleted location screen
+        if (deletedLocationScreen !== null) {
+            await enqueueEsp32Event({
+                eventType: "update_display",
+                payload: {
+                    screenNumber: deletedLocationScreen,
+                    picture: null,
+                },
+                sourceCollection: "locations",
+                sourceId: event.params.locationId,
+            });
+        } else {
+            logger.warn(`Deleted location '${event.params.locationId}' has no valid screenNumber. Skipping display clear queue event.`);
+        }
 
     } catch (error) {
         logger.error("Error occurred during onLocationDeleted execution:", error);
@@ -621,7 +641,7 @@ export const onLocationDeleted = onDocumentDeleted("locations/{locationId}", asy
 /**
  * Trigger: onLocationUpdated
  * Triggers automatically when an ADMIN updates an existing location document in the "locations" collection.
- * Purpose: Cascade Update - If the admin changes a location's name or angle, update all users currently at that location.
+ * Purpose: Cascade Update - If the admin changes a location's name or screenNumber, update all users currently at that location.
  */
 export const onLocationUpdated = onDocumentUpdated("locations/{locationId}", async (event) => {
     const change = event.data;
@@ -636,16 +656,16 @@ export const onLocationUpdated = onDocumentUpdated("locations/{locationId}", asy
     // Extract values before and after the ADMIN's update
     const beforeName = beforeData?.locationName;
     const afterName = afterData?.locationName;
-    const beforeAngle = beforeData?.angle;
-    const afterAngle = afterData?.angle;
+    const beforeScreenNumber = readLocationScreenNumber(beforeData as Record<string, unknown>);
+    const afterScreenNumber = readLocationScreenNumber(afterData as Record<string, unknown>);
 
-    // Optimization: If the admin didn't change the name or the angle, skip execution to save costs
-    if (beforeName === afterName && beforeAngle === afterAngle) {
-        logger.log(`No relevant changes (name or angle) for location ID: ${event.params.locationId}. Skipping execution.`);
+    // Optimization: If the admin didn't change the name or the screen number, skip execution to save costs
+    if (beforeName === afterName && beforeScreenNumber === afterScreenNumber) {
+        logger.log(`No relevant changes (name or screenNumber) for location ID: ${event.params.locationId}. Skipping execution.`);
         return;
     }
 
-    logger.log(`Admin updated location ${event.params.locationId}. Name: '${beforeName}' -> '${afterName}', Angle: ${beforeAngle} -> ${afterAngle}`);
+    logger.log(`Admin updated location ${event.params.locationId}. Name: '${beforeName}' -> '${afterName}', Screen: ${beforeScreenNumber} -> ${afterScreenNumber}`);
 
     if (!beforeName) {
         logger.warn("Before-image missing 'locationName'. Cannot find affected users.");
@@ -668,7 +688,7 @@ export const onLocationUpdated = onDocumentUpdated("locations/{locationId}", asy
         const batch = db.batch();
         
         // Determine the new values to set
-        const finalAngle = afterAngle !== undefined ? afterAngle : 0;
+        const finalScreenNumber = afterScreenNumber !== null ? afterScreenNumber : 0;
         const finalLocationName = afterName || beforeName; // If name didn't change, keep the old one
 
         usersSnapshot.docs.forEach((doc) => {
@@ -677,7 +697,7 @@ export const onLocationUpdated = onDocumentUpdated("locations/{locationId}", asy
             // Update the user's document with the admin's new settings
             batch.update(doc.ref, {
                 currentLocation: finalLocationName,
-                targetAngle: finalAngle
+                targetScreenNumber: finalScreenNumber
             });
         });
 
@@ -844,7 +864,7 @@ async function processVisualGreeting(
                 .get();
             if (!locationSnapshot.empty) {
                 const locationData = locationSnapshot.docs[0].data() as Record<string, unknown>;
-                const locationScreen = readLocationScreen(locationData);
+                const locationScreen = readLocationScreenNumber(locationData);
                 if (locationScreen !== null) {
                     screen = locationScreen;
                 }
@@ -998,7 +1018,7 @@ export const checkAndPromptMissingUpdates = onSchedule(
  * Triggers automatically every hour at minute 0.
  * Purpose: Scans for users who haven't updated their location in over 12 hours.
  * If a location is stale, it automatically reverts the user to "Unknown Location" 
- * and resets their physical clock hand to angle 0.
+ * and resets their target screen number to 0.
  */
 export const flagStaleLocations = onSchedule(
     {
@@ -1046,7 +1066,7 @@ export const flagStaleLocations = onSchedule(
                         // Add the update operation to the batch
                         batch.update(doc.ref, {
                             currentLocation: "Unknown Location",
-                            targetAngle: 0
+                            targetScreenNumber: 0
                         });
                         staleCount++;
                     }
@@ -1056,7 +1076,7 @@ export const flagStaleLocations = onSchedule(
                     logger.warn(`User '${userName}' has a set location but no 'lastLocationUpdateTime'. Reverting to Unknown Location.`);
                     batch.update(doc.ref, {
                         currentLocation: "Unknown Location",
-                        targetAngle: 0
+                        targetScreenNumber: 0
                     });
                     staleCount++;
                 }
@@ -1372,7 +1392,7 @@ export const sendDirectLocationPrompt = onCall(async (request) => {
 /**
  * HTTP Request Function: getClockInitConfig
  * Trigger: ESP32 hardware calls this standard HTTP GET endpoint on startup or reset.
- * Purpose: Fetches all active locations and their corresponding angles.
+ * Purpose: Fetches all active locations and their corresponding screen numbers.
  * Returns: A lightweight JSON object optimized for C++ ArduinoJson parsing.
  */
 export const getClockInitConfig = onRequest(async (request, response) => {
@@ -1396,11 +1416,13 @@ export const getClockInitConfig = onRequest(async (request, response) => {
         locationsSnapshot.forEach((doc) => {
             const data = doc.data();
             
+            const screenNumber = readLocationScreenNumber(data as Record<string, unknown>);
+
             // Validate that the document actually has the required fields
-            if (data.locationName && data.angle !== undefined) {
+            if (data.locationName && screenNumber !== null) {
                 locationsArray.push({
                     name: data.locationName,
-                    angle: data.angle
+                    screenNumber,
                 });
             } else {
                 logger.warn(`Skipped invalid location document: ${doc.id}`);
