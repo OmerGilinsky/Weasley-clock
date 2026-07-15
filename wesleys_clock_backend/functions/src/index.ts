@@ -2,12 +2,19 @@ import {setGlobalOptions} from "firebase-functions";
 import { onDocumentCreated, onDocumentUpdated, onDocumentDeleted} from "firebase-functions/v2/firestore";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import * as logger from "firebase-functions/logger"; 
+import {createHash, randomUUID} from "node:crypto";
+import {execFile} from "node:child_process";
+import {promisify} from "node:util";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
+import {writeFile, unlink} from "node:fs/promises";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
 import { getMessaging } from "firebase-admin/messaging";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { onRequest } from "firebase-functions/v2/https";
+import ffmpegPath from "ffmpeg-static";
 
 
 // Get the Firestore instance to share between functions
@@ -20,6 +27,8 @@ setGlobalOptions({maxInstances: 10});
 
 const ESP32_QUEUE_COLLECTION = "esp32_event_queue";
 const ESP32_QUEUE_STATE_DOC = db.collection("system_status").doc("esp32_queue_state");
+const MEDIA_CONVERSIONS_COLLECTION = "media_conversions";
+const execFileAsync = promisify(execFile);
 
 type Esp32QueueEventType =
     | "play_picture"
@@ -35,6 +44,180 @@ interface QueueEventInput {
     handNumber?: number;
     sourceCollection?: string;
     sourceId?: string;
+}
+
+type SanitizedQueueEvent = {
+    payload: Record<string, unknown>;
+    dropped: boolean;
+    dropReason?: string;
+};
+
+function isMp3Url(url: string): boolean {
+    const lower = url.toLowerCase();
+    const pathLike = lower.split("?")[0].split("#")[0];
+    return pathLike.endsWith(".mp3");
+}
+
+function toEsp32ImageUrl(url: string): string {
+    const trimmed = url.trim();
+    if (!trimmed) {
+        return trimmed;
+    }
+
+    if (trimmed.includes("placehold.co/")) {
+        return trimmed.replace(/\/\d+x\d+\//, "/280x240/");
+    }
+
+    if (trimmed.includes("images.weserv.nl")) {
+        return trimmed;
+    }
+
+    const normalizedSource = trimmed.replace(/^https?:\/\//i, "");
+    return `https://images.weserv.nl/?url=${encodeURIComponent(normalizedSource)}&w=280&h=240&fit=contain&output=jpg`;
+}
+
+async function ensureMp3AudioUrl(audioUrl: string): Promise<string | null> {
+    const sourceUrl = audioUrl.trim();
+    if (!sourceUrl) {
+        return null;
+    }
+
+    if (isMp3Url(sourceUrl)) {
+        return sourceUrl;
+    }
+
+    const ffmpegBinary = typeof ffmpegPath === "string" ? ffmpegPath : null;
+    if (!ffmpegBinary) {
+        logger.error("ffmpeg-static binary is unavailable. Cannot convert audio to mp3.");
+        return null;
+    }
+
+    const sourceHash = createHash("sha1").update(sourceUrl).digest("hex");
+    const conversionRef = db.collection(MEDIA_CONVERSIONS_COLLECTION).doc(sourceHash);
+    const existing = await conversionRef.get();
+    if (existing.exists) {
+        const existingData = existing.data() as Record<string, unknown>;
+        const existingMp3Url = readStringField(existingData, ["mp3Url"]);
+        if (existingMp3Url) {
+            return existingMp3Url;
+        }
+    }
+
+    await conversionRef.set({
+        sourceUrl,
+        status: "processing",
+        updatedAt: FieldValue.serverTimestamp(),
+    }, {merge: true});
+
+    const inputPath = join(tmpdir(), `esp32-audio-${sourceHash}.input`);
+    const outputPath = join(tmpdir(), `esp32-audio-${sourceHash}.mp3`);
+
+    try {
+        const sourceResponse = await fetch(sourceUrl);
+        if (!sourceResponse.ok) {
+            throw new Error(`Failed to download audio. HTTP ${sourceResponse.status}`);
+        }
+
+        const sourceBuffer = Buffer.from(await sourceResponse.arrayBuffer());
+        await writeFile(inputPath, sourceBuffer);
+
+        await execFileAsync(ffmpegBinary, [
+            "-y",
+            "-i", inputPath,
+            "-vn",
+            "-acodec", "libmp3lame",
+            "-ar", "44100",
+            "-ac", "1",
+            "-b:a", "128k",
+            outputPath,
+        ]);
+
+        const bucket = getStorage().bucket();
+        const destination = `esp32_audio/mp3/${sourceHash}.mp3`;
+        const downloadToken = randomUUID();
+
+        await bucket.upload(outputPath, {
+            destination,
+            metadata: {
+                contentType: "audio/mpeg",
+                metadata: {
+                    firebaseStorageDownloadTokens: downloadToken,
+                    sourceAudioUrl: sourceUrl,
+                },
+            },
+        });
+
+        const mp3Url = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(destination)}?alt=media&token=${downloadToken}`;
+
+        await conversionRef.set({
+            status: "ready",
+            mp3Url,
+            updatedAt: FieldValue.serverTimestamp(),
+        }, {merge: true});
+
+        return mp3Url;
+    } catch (error) {
+        await conversionRef.set({
+            status: "failed",
+            lastError: error instanceof Error ? error.message : String(error),
+            updatedAt: FieldValue.serverTimestamp(),
+        }, {merge: true});
+
+        logger.error(`Failed to convert audio to mp3 for ESP32: ${sourceUrl}`, error);
+        return null;
+    } finally {
+        await unlink(inputPath).catch(() => undefined);
+        await unlink(outputPath).catch(() => undefined);
+    }
+}
+
+async function sanitizeEsp32Payload(eventType: Esp32QueueEventType, payload: Record<string, unknown>): Promise<SanitizedQueueEvent> {
+    const sanitizedPayload: Record<string, unknown> = {...payload};
+
+    if (eventType === "play_voice") {
+        const audioUrl = readStringField(payload, ["audioUrl"]);
+        if (!audioUrl) {
+            return {
+                payload: sanitizedPayload,
+                dropped: true,
+                dropReason: "Missing audioUrl",
+            };
+        }
+
+        const finalAudioUrl = isMp3Url(audioUrl) ? audioUrl : await ensureMp3AudioUrl(audioUrl);
+        if (!finalAudioUrl) {
+            return {
+                payload: sanitizedPayload,
+                dropped: true,
+                dropReason: `Audio conversion failed for URL: ${audioUrl}`,
+            };
+        }
+
+        sanitizedPayload.audioUrl = finalAudioUrl;
+        sanitizedPayload.audioFormat = "mp3";
+    }
+
+    if (eventType === "play_picture" || eventType === "update_display") {
+        const pictureUrl = readStringField(payload, ["pictureUrl", "picture"]);
+        if (pictureUrl) {
+            const resized = toEsp32ImageUrl(pictureUrl);
+            if (typeof sanitizedPayload.pictureUrl === "string") {
+                sanitizedPayload.pictureUrl = resized;
+            }
+            if (typeof sanitizedPayload.picture === "string") {
+                sanitizedPayload.picture = resized;
+            }
+            sanitizedPayload.screenSize = {
+                width: 280,
+                height: 240,
+            };
+        }
+    }
+
+    return {
+        payload: sanitizedPayload,
+        dropped: false,
+    };
 }
 
 function readStringField(data: Record<string, unknown>, keys: string[]): string | null {
@@ -101,12 +284,23 @@ function readPictureUrl(data: Record<string, unknown>): string | null {
     return readStringField(data, ["imageUrl", "greetingUrl", "mediaUrl", "displayGreetingUrl", "pictureUrl"]);
 }
 
+function buildLocationPlaceholderImageUrl(locationName: string): string {
+    const safeName = locationName.trim() || "Location";
+    return `https://placehold.co/280x240/png?text=${encodeURIComponent(safeName)}`;
+}
+
 function readAudioUrl(data: Record<string, unknown>): string | null {
     return readStringField(data, ["audioUrl", "mediaUrl", "voiceUrl", "user_voice"]);
 }
 
 async function enqueueEsp32Event(input: QueueEventInput): Promise<string> {
     const eventRef = db.collection(ESP32_QUEUE_COLLECTION).doc();
+    const sanitized = await sanitizeEsp32Payload(input.eventType, input.payload);
+
+    if (sanitized.dropped) {
+        logger.warn(`Dropping ESP32 event '${input.eventType}': ${sanitized.dropReason ?? "Unknown reason"}`);
+        return "dropped";
+    }
 
     await db.runTransaction(async (transaction) => {
         const stateSnapshot = await transaction.get(ESP32_QUEUE_STATE_DOC);
@@ -115,7 +309,7 @@ async function enqueueEsp32Event(input: QueueEventInput): Promise<string> {
 
         const eventDoc: Record<string, unknown> = {
             eventType: input.eventType,
-            payload: input.payload,
+            payload: sanitized.payload,
             sequence: nextSequence,
             status: "pending",
             createdAt: FieldValue.serverTimestamp(),
@@ -136,6 +330,7 @@ async function enqueueEsp32Event(input: QueueEventInput): Promise<string> {
 
         transaction.set(ESP32_QUEUE_STATE_DOC, {
             lastSequence: nextSequence,
+            deviceAvailable: stateSnapshot.data()?.deviceAvailable ?? true,
             updatedAt: FieldValue.serverTimestamp(),
         }, {merge: true});
 
@@ -288,6 +483,10 @@ export const onLocationCreated = onDocumentCreated("locations/{locationId}",
         }
 
         const locationId = event.params.locationId;
+        const createdLocationData = snapshot.data() as Record<string, unknown>;
+        const locationName = readStringField(createdLocationData, ["locationName", "name"]) ?? "Location";
+        const existingPictureUrl = readPictureUrl(createdLocationData);
+        const fallbackPictureUrl = existingPictureUrl ?? buildLocationPlaceholderImageUrl(locationName);
         let assignedScreenNumberForQueue: number | null = null;
 
         try {
@@ -322,20 +521,26 @@ export const onLocationCreated = onDocumentCreated("locations/{locationId}",
                     logger.log(`Assigning screenNumber ${assignedScreenNumber} to location ${locationId}`);
                 }
 
-                transaction.set(snapshot.ref, {
+                const updates: Record<string, unknown> = {
                     screenNumber: assignedScreenNumber,
-                }, { merge: true });
+                };
+
+                if (!existingPictureUrl) {
+                    // Ensure newly created locations always have a picture URL for the display flow.
+                    updates.imageUrl = fallbackPictureUrl;
+                }
+
+                transaction.set(snapshot.ref, updates, { merge: true });
 
                 assignedScreenNumberForQueue = assignedScreenNumber;
             });
 
             if (assignedScreenNumberForQueue !== null) {
-                const createdLocationData = snapshot.data() as Record<string, unknown>;
                 await enqueueEsp32Event({
                     eventType: "update_display",
                     payload: {
                         screenNumber: assignedScreenNumberForQueue,
-                        picture: readPictureUrl(createdLocationData),
+                        picture: fallbackPictureUrl,
                     },
                     sourceCollection: "locations",
                     sourceId: locationId,
@@ -1544,42 +1749,96 @@ export const popNextEsp32Event = onRequest(async (request, response) => {
     }
 
     try {
-        const userId = typeof request.query.userId === "string" ? request.query.userId : null;
-        let query = db.collection(ESP32_QUEUE_COLLECTION)
-            .where("status", "==", "pending")
-            .orderBy("sequence", "asc")
-            .limit(1);
+        const claimResult = await db.runTransaction(async (transaction) => {
+            const stateSnapshot = await transaction.get(ESP32_QUEUE_STATE_DOC);
+            const stateData = stateSnapshot.data() as Record<string, unknown> | undefined;
+            const inFlightEventDocId = typeof stateData?.inFlightEventDocId === "string" ? stateData.inFlightEventDocId : null;
+            const inFlightSequence = typeof stateData?.inFlightSequence === "number" ? stateData.inFlightSequence : null;
+            const deviceAvailable = stateData?.deviceAvailable !== false;
 
-        if (userId) {
-            query = query.where("userId", "==", userId);
-        }
+            if (inFlightEventDocId) {
+                return {
+                    status: "busy" as const,
+                    inFlightSequence,
+                };
+            }
 
-        const queueSnapshot = await query.get();
-        if (queueSnapshot.empty) {
-            response.status(200).json({status: "empty"});
-            return;
-        }
+            if (!deviceAvailable) {
+                return {
+                    status: "unavailable" as const,
+                    inFlightSequence: stateData?.lastAckSequence ?? null,
+                };
+            }
 
-        const eventDoc = queueSnapshot.docs[0];
-        await db.runTransaction(async (transaction) => {
-            const latestSnapshot = await transaction.get(eventDoc.ref);
-            const latestStatus = latestSnapshot.data()?.status;
-            if (latestStatus !== "pending") {
-                throw new Error("Event already claimed");
+            const query = db.collection(ESP32_QUEUE_COLLECTION)
+                .where("status", "==", "pending")
+                .orderBy("sequence", "asc")
+                .limit(1);
+
+            const queueSnapshot = await transaction.get(query);
+            if (queueSnapshot.empty) {
+                return {
+                    status: "empty" as const,
+                };
+            }
+
+            const eventDoc = queueSnapshot.docs[0];
+            const eventData = eventDoc.data() as Record<string, unknown>;
+            const sequence = typeof eventData.sequence === "number" ? eventData.sequence : null;
+            if (sequence === null) {
+                transaction.update(eventDoc.ref, {
+                    status: "failed",
+                    lastError: "Missing sequence",
+                    completedAt: FieldValue.serverTimestamp(),
+                });
+                return {
+                    status: "empty" as const,
+                };
             }
 
             transaction.update(eventDoc.ref, {
                 status: "processing",
                 claimedAt: FieldValue.serverTimestamp(),
             });
+
+            transaction.set(ESP32_QUEUE_STATE_DOC, {
+                inFlightEventDocId: eventDoc.id,
+                inFlightSequence: sequence,
+                deviceAvailable: false,
+                lastDispatchAt: FieldValue.serverTimestamp(),
+                updatedAt: FieldValue.serverTimestamp(),
+            }, {merge: true});
+
+            return {
+                status: "ok" as const,
+                eventDocId: eventDoc.id,
+                eventData,
+                sequence,
+            };
         });
 
-        const eventData = eventDoc.data();
+        if (claimResult.status === "empty") {
+            response.status(200).json({status: "empty"});
+            return;
+        }
+
+        if (claimResult.status === "busy" || claimResult.status === "unavailable") {
+            response.status(200).json({
+                status: "wait",
+                reason: claimResult.status,
+                inFlightSequence: claimResult.inFlightSequence ?? null,
+            });
+            return;
+        }
+
         response.status(200).json({
             status: "ok",
             event: {
-                id: eventDoc.id,
-                ...eventData,
+                // ESP32 should ACK using this sequence id.
+                id: claimResult.sequence,
+                sequence: claimResult.sequence,
+                queueDocId: claimResult.eventDocId,
+                ...claimResult.eventData,
             },
         });
     } catch (error) {
@@ -1601,28 +1860,98 @@ export const completeEsp32Event = onRequest(async (request, response) => {
 
     try {
         const eventId = typeof request.body?.eventId === "string" ? request.body.eventId : null;
+        const sequenceIdRaw = request.body?.sequenceId;
+        const sequenceId = typeof sequenceIdRaw === "number" ? sequenceIdRaw :
+            (typeof sequenceIdRaw === "string" ? Number.parseInt(sequenceIdRaw, 10) : null);
         const wasSuccessful = request.body?.success !== false;
+        const isAvailable = request.body?.available !== false;
         const errorMessage = typeof request.body?.errorMessage === "string" ? request.body.errorMessage : null;
 
-        if (!eventId) {
-            response.status(400).json({error: "Bad Request. Missing eventId."});
+        if (!eventId && (sequenceId === null || Number.isNaN(sequenceId))) {
+            response.status(400).json({error: "Bad Request. Missing sequenceId or eventId."});
             return;
         }
 
-        const eventRef = db.collection(ESP32_QUEUE_COLLECTION).doc(eventId);
-        const eventSnapshot = await eventRef.get();
-        if (!eventSnapshot.exists) {
+        const completionResult = await db.runTransaction(async (transaction) => {
+            const stateSnapshot = await transaction.get(ESP32_QUEUE_STATE_DOC);
+            const stateData = stateSnapshot.data() as Record<string, unknown> | undefined;
+            const inFlightEventDocId = typeof stateData?.inFlightEventDocId === "string" ? stateData.inFlightEventDocId : null;
+            const inFlightSequence = typeof stateData?.inFlightSequence === "number" ? stateData.inFlightSequence : null;
+
+            let eventDocIdToComplete: string | null = null;
+            let sequenceToAck: number | null = null;
+
+            if (typeof sequenceId === "number" && Number.isFinite(sequenceId)) {
+                sequenceToAck = sequenceId;
+                if (inFlightSequence !== null && inFlightSequence !== sequenceId) {
+                    return {status: "mismatch" as const};
+                }
+
+                if (inFlightEventDocId) {
+                    eventDocIdToComplete = inFlightEventDocId;
+                } else {
+                    const query = db.collection(ESP32_QUEUE_COLLECTION)
+                        .where("sequence", "==", sequenceId)
+                        .orderBy("createdAt", "desc")
+                        .limit(1);
+                    const result = await transaction.get(query);
+                    if (!result.empty) {
+                        eventDocIdToComplete = result.docs[0].id;
+                    }
+                }
+            } else if (eventId) {
+                eventDocIdToComplete = eventId;
+            }
+
+            if (!eventDocIdToComplete) {
+                return {status: "not_found" as const};
+            }
+
+            const eventRef = db.collection(ESP32_QUEUE_COLLECTION).doc(eventDocIdToComplete);
+            const eventSnapshot = await transaction.get(eventRef);
+            if (!eventSnapshot.exists) {
+                return {status: "not_found" as const};
+            }
+
+            const eventData = eventSnapshot.data() as Record<string, unknown>;
+            const eventSequence = typeof eventData.sequence === "number" ? eventData.sequence : null;
+            const finalSequence = sequenceToAck ?? eventSequence;
+
+            transaction.set(eventRef, {
+                status: wasSuccessful ? "done" : "failed",
+                completedAt: FieldValue.serverTimestamp(),
+                lastError: errorMessage,
+            }, {merge: true});
+
+            transaction.set(ESP32_QUEUE_STATE_DOC, {
+                inFlightEventDocId: FieldValue.delete(),
+                inFlightSequence: FieldValue.delete(),
+                lastAckSequence: finalSequence,
+                deviceAvailable: isAvailable,
+                updatedAt: FieldValue.serverTimestamp(),
+            }, {merge: true});
+
+            return {
+                status: "success" as const,
+                acknowledgedSequence: finalSequence,
+            };
+        });
+
+        if (completionResult.status === "not_found") {
             response.status(404).json({error: "Event not found."});
             return;
         }
 
-        await eventRef.set({
-            status: wasSuccessful ? "done" : "failed",
-            completedAt: FieldValue.serverTimestamp(),
-            lastError: errorMessage,
-        }, {merge: true});
+        if (completionResult.status === "mismatch") {
+            response.status(409).json({error: "ACK sequence mismatch with in-flight event."});
+            return;
+        }
 
-        response.status(200).json({status: "success"});
+        response.status(200).json({
+            status: "success",
+            acknowledgedSequence: completionResult.acknowledgedSequence ?? null,
+            available: isAvailable,
+        });
     } catch (error) {
         logger.error("Error while completing ESP32 event:", error);
         response.status(500).json({error: "Internal Server Error"});
