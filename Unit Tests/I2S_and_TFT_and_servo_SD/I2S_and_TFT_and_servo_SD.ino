@@ -14,7 +14,7 @@
 //I2C_GND         GND
 //I2C_LCK         RX2
 //I2C_DIN         TX2
-//I2C_BCK         D5
+//I2C_BCK         D19
 
 //SD_3V3          3V3
 //SD_CS           D15
@@ -25,7 +25,7 @@
 
 //servo_brown     GND
 //servo_red       external 5V
-//servo_orange1   D19
+//servo_orange1   D5
 //servo_orange2   D21
 //servo_orange3   D22
 //servo_orange4   D32
