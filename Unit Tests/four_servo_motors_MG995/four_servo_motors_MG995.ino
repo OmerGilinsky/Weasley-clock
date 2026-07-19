@@ -14,6 +14,11 @@ Servo servoMotor2;
 Servo servoMotor3;
 Servo servoMotor4;
 
+int angles1[] = {22, 1, 45, 96, 143};
+int angles2[] = {22, 0, 48, 94, 141};
+int angles3[] = {25, 3, 51, 98, 143};
+int angles4[] = {17, 0, 33, 67, 105};
+
 void setup() {
   Serial.begin(115200);
   
@@ -22,65 +27,65 @@ void setup() {
   servoMotor3.attach(servoPin3);
   servoMotor4.attach(servoPin4);
 
-  servoMotor1.write(0);
+  servoMotor1.write(angles1[0]);
   delay(1000);
   
-  servoMotor2.write(0);
+  servoMotor2.write(angles2[0]);
   delay(1000);
 
-  servoMotor3.write(0);
+  servoMotor3.write(angles3[0]);
   delay(1000);
   
-  servoMotor4.write(0);
+  servoMotor4.write(angles4[0]);
   delay(1000);
 }
 
 void loop() {
   Serial.println("servo 1");
-  servoMotor1.write(22);
+  servoMotor1.write(angles1[1]);
   delay(1000);
-  servoMotor1.write(45);
+  servoMotor1.write(angles1[2]);
   delay(1000);
-  servoMotor1.write(90);
+  servoMotor1.write(angles1[3]);
   delay(1000);
-  servoMotor1.write(135);
+  servoMotor1.write(angles1[4]);
   delay(1000);
-  servoMotor1.write(0);
+  servoMotor1.write(angles1[0]);
   delay(1000);
 
   Serial.println("servo 2");
-  servoMotor2.write(22);
+  servoMotor2.write(angles2[1]);
   delay(1000);
-  servoMotor2.write(45);
+  servoMotor2.write(angles2[2]);
   delay(1000);
-  servoMotor2.write(90);
+  servoMotor2.write(angles2[3]);
   delay(1000);
-  servoMotor2.write(135);
+  servoMotor2.write(angles2[4]);
   delay(1000);
-  servoMotor2.write(0);
+  servoMotor2.write(angles2[0]);
   delay(1000);
 
   Serial.println("servo 3");
-  servoMotor3.write(22);
+  servoMotor3.write(angles3[1]);
   delay(1000);
-  servoMotor3.write(45);
+  servoMotor3.write(angles3[2]);
   delay(1000);
-  servoMotor3.write(90);
+  servoMotor3.write(angles3[3]);
   delay(1000);
-  servoMotor3.write(135);
+  servoMotor3.write(angles3[4]);
   delay(1000);
-  servoMotor3.write(0);
+  servoMotor3.write(angles3[0]);
   delay(1000);
 
   Serial.println("servo 4");
-  servoMotor4.write(22);
+  servoMotor4.write(angles4[1]);
   delay(1000);
-  servoMotor4.write(45);
+  servoMotor4.write(angles4[2]);
   delay(1000);
-  servoMotor4.write(90);
+  servoMotor4.write(angles4[3]);
   delay(1000);
-  servoMotor4.write(135);
+  servoMotor4.write(angles4[4]);
   delay(1000);
-  servoMotor4.write(0);
+  servoMotor4.write(angles4[0]);
   delay(1000);
 }

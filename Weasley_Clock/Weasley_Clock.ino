@@ -81,8 +81,6 @@ volatile bool dataChanged = false;
 #define servo_PWM3  22
 #define servo_PWM4  32
 
-#define zeroAngle   0
-
 SPIClass SD_SPI(HSPI);
 
 TFT_eSPI tft = TFT_eSPI();
@@ -104,7 +102,10 @@ char* images[] = {"", "", "", ""};
 char* locations[] = {"", "", "", ""};
 char* names[] = {"", "", "", ""};
 
-uint8_t angles = {zeroAngle, zeroAngle + 45, zeroAngle + 90, zeroAngle + 135};
+int angles1[] = {22, 1, 45, 96, 143};
+int angles2[] = {22, 0, 48, 94, 141};
+int angles3[] = {25, 3, 51, 98, 143};
+int angles4[] = {17, 0, 33, 67, 105};
 
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
   if (y >= tft.height()) return 0;
@@ -231,14 +232,14 @@ void setup() {
   servoMotor3.attach(servo_PWM3);
   servoMotor4.attach(servo_PWM4);
 
-  servoMotor1.write(angles[0]);
-  delay(500);
-  servoMotor2.write(angles[0]);
-  delay(500);
-  servoMotor3.write(angles[0]);
-  delay(500);
-  servoMotor4.write(angles[0]);
-  delay(500);
+  servoMotor1.write(angles1[0]);
+  delay(1000);
+  servoMotor2.write(angles2[0]);
+  delay(1000);
+  servoMotor3.write(angles3[0]);
+  delay(1000);
+  servoMotor4.write(angles4[0]);
+  delay(1000);
 
   Serial.println("Aligned servos");
   Serial.println();
@@ -317,7 +318,12 @@ bool update_name(uint8_t hand, char* name) {
 bool move_hand(uint8_t hand, uint8_t display) {
   Serial.println("Moving hand " + hand + " to display " + display);
 
-  hands[hand].write(angles[display]);
+  switch(display) {
+    case 1: hands[hand].write(angles1[display]); break;
+    case 2: hands[hand].write(angles2[display]); break;
+    case 3: hands[hand].write(angles3[display]); break;
+    case 4: hands[hand].write(angles4[display]); break;
+  }
 
   audio.connecttoFS(SD, names[hand]);
   while (true) {
