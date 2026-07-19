@@ -73,9 +73,10 @@ Servo servoMotor2;
 Servo servoMotor3;
 Servo servoMotor4;
 
-int centerServoAngle = map(0, -60, 60, 0, 180);
-int rightServoAngle = map(30, -60, 60, 0, 180);
-int leftServoAngle = map(-30, -60, 60, 0, 180);
+int angles1[] = {22, 1, 45, 96, 143};
+int angles2[] = {22, 0, 48, 94, 141};
+int angles3[] = {25, 3, 51, 98, 143};
+int angles4[] = {17, 0, 33, 67, 105};
 
 bool tft_output(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t* bitmap) {
   if (y >= tft.height()) return 0;
@@ -107,18 +108,17 @@ void displays_and_servos(void* params) {
     targetDisplay(TFT_CS4);
     TJpgDec.drawFsJpg(0, 0, "/Perion.jpg", SD);
 
-    Serial.println("right -> 1");
-    servoMotor1.write(rightServoAngle);
-    vTaskDelay(pdMS_TO_TICKS(500));
-    Serial.println("center -> 1");
-    servoMotor1.write(centerServoAngle);
-    vTaskDelay(pdMS_TO_TICKS(500));
-    Serial.println("left -> 1");
-    servoMotor1.write(leftServoAngle);
-    vTaskDelay(pdMS_TO_TICKS(500));
-    Serial.println("center -> 1");
-    servoMotor1.write(centerServoAngle);
-    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("servo 1");
+    servoMotor1.write(angles1[1]);
+    delay(1000);
+    servoMotor1.write(angles1[2]);
+    delay(1000);
+    servoMotor1.write(angles1[3]);
+    delay(1000);
+    servoMotor1.write(angles1[4]);
+    delay(1000);
+    servoMotor1.write(angles1[0]);
+    delay(1000);
 
     Serial.println("Ellinia -> 1, Kerning -> 2, Perion -> 3, Henesys -> 4");
     
@@ -134,18 +134,17 @@ void displays_and_servos(void* params) {
     targetDisplay(TFT_CS4);
     TJpgDec.drawFsJpg(0, 0, "/Kerning.jpg", SD);
 
-    Serial.println("right -> 2");
-    servoMotor2.write(rightServoAngle);
-    vTaskDelay(pdMS_TO_TICKS(500));
-    Serial.println("center -> 2");
-    servoMotor2.write(centerServoAngle);
-    vTaskDelay(pdMS_TO_TICKS(500));
-    Serial.println("left -> 2");
-    servoMotor2.write(leftServoAngle);
-    vTaskDelay(pdMS_TO_TICKS(500));
-    Serial.println("center -> 2");
-    servoMotor2.write(centerServoAngle);
-    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("servo 2");
+    servoMotor2.write(angles2[1]);
+    delay(1000);
+    servoMotor2.write(angles2[2]);
+    delay(1000);
+    servoMotor2.write(angles2[3]);
+    delay(1000);
+    servoMotor2.write(angles2[4]);
+    delay(1000);
+    servoMotor2.write(angles2[0]);
+    delay(1000);
 
     Serial.println("Kerning -> 1, Perion -> 2, Henesys -> 3, Ellinia -> 4");
     
@@ -161,18 +160,17 @@ void displays_and_servos(void* params) {
     targetDisplay(TFT_CS4);
     TJpgDec.drawFsJpg(0, 0, "/Ellinia.jpg", SD);
 
-    Serial.println("right -> 3");
-    servoMotor3.write(rightServoAngle);
-    vTaskDelay(pdMS_TO_TICKS(500));
-    Serial.println("center -> 3");
-    servoMotor3.write(centerServoAngle);
-    vTaskDelay(pdMS_TO_TICKS(500));
-    Serial.println("left -> 3");
-    servoMotor3.write(leftServoAngle);
-    vTaskDelay(pdMS_TO_TICKS(500));
-    Serial.println("center -> 3");
-    servoMotor3.write(centerServoAngle);
-    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("servo 3");
+    servoMotor3.write(angles3[1]);
+    delay(1000);
+    servoMotor3.write(angles3[2]);
+    delay(1000);
+    servoMotor3.write(angles3[3]);
+    delay(1000);
+    servoMotor3.write(angles3[4]);
+    delay(1000);
+    servoMotor3.write(angles3[0]);
+    delay(1000);
 
     Serial.println("Perion -> 1, Henesys -> 2, Ellinia -> 3, Kerning -> 4");
     
@@ -188,18 +186,17 @@ void displays_and_servos(void* params) {
     targetDisplay(TFT_CS4);
     TJpgDec.drawFsJpg(0, 0, "/Henesys.jpg", SD);
 
-    Serial.println("right -> 4");
-    servoMotor4.write(rightServoAngle);
-    vTaskDelay(pdMS_TO_TICKS(500));
-    Serial.println("center -> 4");
-    servoMotor4.write(centerServoAngle);
-    vTaskDelay(pdMS_TO_TICKS(500));
-    Serial.println("left -> 4");
-    servoMotor4.write(leftServoAngle);
-    vTaskDelay(pdMS_TO_TICKS(500));
-    Serial.println("center -> 4");
-    servoMotor4.write(centerServoAngle);
-    vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.println("servo 4");
+    servoMotor4.write(angles4[1]);
+    delay(1000);
+    servoMotor4.write(angles4[2]);
+    delay(1000);
+    servoMotor4.write(angles4[3]);
+    delay(1000);
+    servoMotor4.write(angles4[4]);
+    delay(1000);
+    servoMotor4.write(angles4[0]);
+    delay(1000);
   }
 }
 
@@ -211,14 +208,14 @@ void setup() {
   servoMotor3.attach(servo_PWM3);
   servoMotor4.attach(servo_PWM4);
 
-  servoMotor1.write(centerServoAngle);
-  delay(500);
-  servoMotor2.write(centerServoAngle);
-  delay(500);
-  servoMotor3.write(centerServoAngle);
-  delay(500);
-  servoMotor4.write(centerServoAngle);
-  delay(500);
+  servoMotor1.write(angles1[0]);
+  delay(1000);
+  servoMotor2.write(angles2[0]);
+  delay(1000);
+  servoMotor3.write(angles3[0]);
+  delay(1000);
+  servoMotor4.write(angles4[0]);
+  delay(1000);
   Serial.println("Servos are set");
 
   SD_SPI.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
