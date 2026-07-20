@@ -228,55 +228,128 @@ async function ensureMp3AudioUrl(audioUrl: string): Promise<string | null> {
 //     };
 // }
 
-async function sanitizeEsp32Payload(eventType: Esp32QueueEventType, payload: Record<string, unknown>): Promise<SanitizedQueueEvent> {
-    const sanitizedPayload: Record<string, unknown> = {...payload};
-    const bucket = getStorage().bucket();
+// async function sanitizeEsp32Payload(eventType: Esp32QueueEventType, payload: Record<string, unknown>): Promise<SanitizedQueueEvent> {
+//     const sanitizedPayload: Record<string, unknown> = {...payload};
+//     const bucket = getStorage().bucket();
 
-    const getStoragePath = (url: string) => {
-        if (!url.startsWith("http")) return url;
-        try {
-            if (url.includes("/o/")) return decodeURIComponent(url.split("/o/")[1].split("?")[0]);
-        } catch (e) { logger.error("Path extraction failed", e); }
-        return url;
-    };
+//     const getStoragePath = (url: string) => {
+//         if (!url.startsWith("http")) return url;
+//         try {
+//             if (url.includes("/o/")) return decodeURIComponent(url.split("/o/")[1].split("?")[0]);
+//         } catch (e) { logger.error("Path extraction failed", e); }
+//         return url;
+//     };
 
-    if (eventType === "play_voice") {
-        const audioUrl = readStringField(payload, ["audioUrl"]);
-        if (!audioUrl) return { payload: sanitizedPayload, dropped: true, dropReason: "Missing audioUrl" };
+//     if (eventType === "play_voice") {
+//         const audioUrl = readStringField(payload, ["audioUrl"]);
+//         if (!audioUrl) return { payload: sanitizedPayload, dropped: true, dropReason: "Missing audioUrl" };
 
-        const finalUrl = isMp3Url(audioUrl) ? audioUrl : await ensureMp3AudioUrl(audioUrl);
-        if (!finalUrl) return { payload: sanitizedPayload, dropped: true, dropReason: "Audio conversion failed" };
+//         const finalUrl = isMp3Url(audioUrl) ? audioUrl : await ensureMp3AudioUrl(audioUrl);
+//         if (!finalUrl) return { payload: sanitizedPayload, dropped: true, dropReason: "Audio conversion failed" };
         
-        sanitizedPayload.audioUrl = getStoragePath(finalUrl);
-        sanitizedPayload.audioFormat = "mp3";
+//         sanitizedPayload.audioUrl = getStoragePath(finalUrl);
+//         sanitizedPayload.audioFormat = "mp3";
+//     }
+
+//     if (eventType === "play_picture" || eventType === "update_display") {
+//         const pictureUrl = readStringField(payload, ["pictureUrl", "picture"]);
+//         if (pictureUrl) {
+//             if (pictureUrl.startsWith("http") && !pictureUrl.includes("firebasestorage.googleapis.com")) {
+//                 try {
+//                     const hash = createHash("sha1").update(pictureUrl).digest("hex");
+//                     const destination = `esp32_images/${hash}.jpg`;
+//                     const file = bucket.file(destination);
+                    
+//                     const [exists] = await file.exists();
+//                     if (!exists) {
+//                         const response = await fetch(pictureUrl);
+//                         const buffer = Buffer.from(await response.arrayBuffer());
+//                         await file.save(buffer, { contentType: "image/jpeg" });
+//                     }
+//                     sanitizedPayload.pictureUrl = destination;
+//                 } catch (e) {
+//                     logger.error("Failed to download external image to storage", e);
+//                     sanitizedPayload.pictureUrl = toEsp32ImageUrl(pictureUrl); 
+//                 }
+//             } else {
+//                 sanitizedPayload.pictureUrl = getStoragePath(pictureUrl);
+//             }
+            
+//             sanitizedPayload.picture = sanitizedPayload.pictureUrl;
+//             sanitizedPayload.screenSize = { width: 280, height: 240 };
+//         }
+//     }
+
+//     return { payload: sanitizedPayload, dropped: false };
+// }
+
+const getStoragePath = (url: string) => {
+    if (!url.startsWith("http")) return url;
+    try {
+        if (url.includes("/o/")) {
+            let path = decodeURIComponent(url.split("/o/")[1].split("?")[0]);
+            return path.startsWith("/") ? path : `/${path}`;
+        }
+    } catch (e) {
+        console.error("Path extraction failed", e);
     }
+    return url;
+};
+
+async function sanitizeEsp32Payload(eventType: Esp32QueueEventType, payload: Record<string, unknown>): Promise<SanitizedQueueEvent> {
+    const sanitizedPayload: Record<string, unknown> = { ...payload };
+    const bucket = getStorage().bucket("wesleys-clock.firebasestorage.app");
+
+    const processExternalFile = async (url: string, folder: string, defaultExt: string = "jpg") => {
+        const hash = createHash("sha1").update(url).digest("hex").substring(0, 16);
+    
+        const cleanUrl = url.split(/[?#]/)[0];
+        const extMatch = cleanUrl.match(/\.([a-z0-9]+)$/i);
+        const ext = extMatch ? extMatch[1].toLowerCase() : defaultExt; 
+    
+        const destination = `${folder}/${hash}.${ext}`;
+        const file = bucket.file(destination);
+
+        const [exists] = await file.exists();
+        if (!exists) {
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`Failed to fetch external file: ${response.statusText}`);
+            }
+            const buffer = Buffer.from(await response.arrayBuffer());
+            
+            const contentType = ext === "mp3" ? "audio/mpeg" : "image/jpeg";
+            await file.save(buffer, { metadata: { contentType } });
+        }
+        return destination.startsWith("/") ? destination : `/${destination}`; 
+    };
 
     if (eventType === "play_picture" || eventType === "update_display") {
         const pictureUrl = readStringField(payload, ["pictureUrl", "picture"]);
-        if (pictureUrl) {
-            if (pictureUrl.startsWith("http") && !pictureUrl.includes("firebasestorage.googleapis.com")) {
-                try {
-                    const hash = createHash("sha1").update(pictureUrl).digest("hex");
-                    const destination = `esp32_images/${hash}.jpg`;
-                    const file = bucket.file(destination);
-                    
-                    const [exists] = await file.exists();
-                    if (!exists) {
-                        const response = await fetch(pictureUrl);
-                        const buffer = Buffer.from(await response.arrayBuffer());
-                        await file.save(buffer, { contentType: "image/jpeg" });
-                    }
-                    sanitizedPayload.pictureUrl = destination;
-                } catch (e) {
-                    logger.error("Failed to download external image to storage", e);
-                    sanitizedPayload.pictureUrl = toEsp32ImageUrl(pictureUrl); 
-                }
-            } else {
-                sanitizedPayload.pictureUrl = getStoragePath(pictureUrl);
+        if (pictureUrl?.startsWith("http") && !pictureUrl.includes("firebasestorage.googleapis.com")) {
+            let folder = "locations";
+            if (payload.sourceCollection === "greetings") {
+                folder = "greetings/visual_messages";
             }
-            
-            sanitizedPayload.picture = sanitizedPayload.pictureUrl;
-            sanitizedPayload.screenSize = { width: 280, height: 240 };
+            sanitizedPayload.pictureUrl = await processExternalFile(pictureUrl, folder, "jpg");
+        } else if (pictureUrl) {
+            sanitizedPayload.pictureUrl = getStoragePath(pictureUrl);
+        }
+        sanitizedPayload.picture = sanitizedPayload.pictureUrl;
+        sanitizedPayload.screenSize = { width: 280, height: 240 };
+    }
+
+    if (eventType === "play_voice") {
+        const audioUrl = readStringField(payload, ["audioUrl"]);
+        if (audioUrl?.startsWith("http") && !audioUrl.includes("firebasestorage.googleapis.com")) {
+            let folder = "audio_bites";
+            if (payload.sourceCollection === "greetings") {
+                folder = "greetings/voice_messages";
+            }
+            sanitizedPayload.audioUrl = await processExternalFile(audioUrl, folder, "mp3");
+            sanitizedPayload.audioFormat = "mp3";
+        } else if (audioUrl) {
+            sanitizedPayload.audioUrl = getStoragePath(audioUrl);
         }
     }
 
