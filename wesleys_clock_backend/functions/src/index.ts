@@ -269,10 +269,9 @@ async function sanitizeEsp32Payload(eventType: Esp32QueueEventType, payload: Rec
                     sanitizedPayload.pictureUrl = destination;
                 } catch (e) {
                     logger.error("Failed to download external image to storage", e);
-                    sanitizedPayload.pictureUrl = toEsp32ImageUrl(pictureUrl); // גיבוי ל-URL במקרה של כשל
+                    sanitizedPayload.pictureUrl = toEsp32ImageUrl(pictureUrl); 
                 }
             } else {
-                // זה כבר ב-Storage, רק נחלץ את הנתיב
                 sanitizedPayload.pictureUrl = getStoragePath(pictureUrl);
             }
             
