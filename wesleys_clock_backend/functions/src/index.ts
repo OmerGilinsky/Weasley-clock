@@ -21,7 +21,11 @@ const DATABASE_URL = "https://wesleys-clock-default-rtdb.firebaseio.com";
 
 // Get the Firestore instance to share between functions
 if (getApps().length === 0) {
-    initializeApp({databaseURL: DATABASE_URL});
+    // initializeApp({databaseURL: DATABASE_URL});
+    initializeApp({
+        databaseURL: DATABASE_URL,
+        storageBucket: "wesleys-clock.firebasestorage.app"
+    });
 }
 const db = getFirestore();
 const rtdb = getDatabase();
@@ -175,53 +179,109 @@ async function ensureMp3AudioUrl(audioUrl: string): Promise<string | null> {
     }
 }
 
+// async function sanitizeEsp32Payload(eventType: Esp32QueueEventType, payload: Record<string, unknown>): Promise<SanitizedQueueEvent> {
+//     const sanitizedPayload: Record<string, unknown> = {...payload};
+
+//     if (eventType === "play_voice") {
+//         const audioUrl = readStringField(payload, ["audioUrl"]);
+//         if (!audioUrl) {
+//             return {
+//                 payload: sanitizedPayload,
+//                 dropped: true,
+//                 dropReason: "Missing audioUrl",
+//             };
+//         }
+
+//         const finalAudioUrl = isMp3Url(audioUrl) ? audioUrl : await ensureMp3AudioUrl(audioUrl);
+//         if (!finalAudioUrl) {
+//             return {
+//                 payload: sanitizedPayload,
+//                 dropped: true,
+//                 dropReason: `Audio conversion failed for URL: ${audioUrl}`,
+//             };
+//         }
+
+//         sanitizedPayload.audioUrl = finalAudioUrl;
+//         sanitizedPayload.audioFormat = "mp3";
+//     }
+
+//     if (eventType === "play_picture" || eventType === "update_display") {
+//         const pictureUrl = readStringField(payload, ["pictureUrl", "picture"]);
+//         if (pictureUrl) {
+//             const resized = toEsp32ImageUrl(pictureUrl);
+//             if (typeof sanitizedPayload.pictureUrl === "string") {
+//                 sanitizedPayload.pictureUrl = resized;
+//             }
+//             if (typeof sanitizedPayload.picture === "string") {
+//                 sanitizedPayload.picture = resized;
+//             }
+//             sanitizedPayload.screenSize = {
+//                 width: 280,
+//                 height: 240,
+//             };
+//         }
+//     }
+
+//     return {
+//         payload: sanitizedPayload,
+//         dropped: false,
+//     };
+// }
+
 async function sanitizeEsp32Payload(eventType: Esp32QueueEventType, payload: Record<string, unknown>): Promise<SanitizedQueueEvent> {
     const sanitizedPayload: Record<string, unknown> = {...payload};
+    const bucket = getStorage().bucket();
+
+    const getStoragePath = (url: string) => {
+        if (!url.startsWith("http")) return url;
+        try {
+            if (url.includes("/o/")) return decodeURIComponent(url.split("/o/")[1].split("?")[0]);
+        } catch (e) { logger.error("Path extraction failed", e); }
+        return url;
+    };
 
     if (eventType === "play_voice") {
         const audioUrl = readStringField(payload, ["audioUrl"]);
-        if (!audioUrl) {
-            return {
-                payload: sanitizedPayload,
-                dropped: true,
-                dropReason: "Missing audioUrl",
-            };
-        }
+        if (!audioUrl) return { payload: sanitizedPayload, dropped: true, dropReason: "Missing audioUrl" };
 
-        const finalAudioUrl = isMp3Url(audioUrl) ? audioUrl : await ensureMp3AudioUrl(audioUrl);
-        if (!finalAudioUrl) {
-            return {
-                payload: sanitizedPayload,
-                dropped: true,
-                dropReason: `Audio conversion failed for URL: ${audioUrl}`,
-            };
-        }
-
-        sanitizedPayload.audioUrl = finalAudioUrl;
+        const finalUrl = isMp3Url(audioUrl) ? audioUrl : await ensureMp3AudioUrl(audioUrl);
+        if (!finalUrl) return { payload: sanitizedPayload, dropped: true, dropReason: "Audio conversion failed" };
+        
+        sanitizedPayload.audioUrl = getStoragePath(finalUrl);
         sanitizedPayload.audioFormat = "mp3";
     }
 
     if (eventType === "play_picture" || eventType === "update_display") {
         const pictureUrl = readStringField(payload, ["pictureUrl", "picture"]);
         if (pictureUrl) {
-            const resized = toEsp32ImageUrl(pictureUrl);
-            if (typeof sanitizedPayload.pictureUrl === "string") {
-                sanitizedPayload.pictureUrl = resized;
+            if (pictureUrl.startsWith("http") && !pictureUrl.includes("firebasestorage.googleapis.com")) {
+                try {
+                    const hash = createHash("sha1").update(pictureUrl).digest("hex");
+                    const destination = `esp32_images/${hash}.jpg`;
+                    const file = bucket.file(destination);
+                    
+                    const [exists] = await file.exists();
+                    if (!exists) {
+                        const response = await fetch(pictureUrl);
+                        const buffer = Buffer.from(await response.arrayBuffer());
+                        await file.save(buffer, { contentType: "image/jpeg" });
+                    }
+                    sanitizedPayload.pictureUrl = destination;
+                } catch (e) {
+                    logger.error("Failed to download external image to storage", e);
+                    sanitizedPayload.pictureUrl = toEsp32ImageUrl(pictureUrl); // גיבוי ל-URL במקרה של כשל
+                }
+            } else {
+                // זה כבר ב-Storage, רק נחלץ את הנתיב
+                sanitizedPayload.pictureUrl = getStoragePath(pictureUrl);
             }
-            if (typeof sanitizedPayload.picture === "string") {
-                sanitizedPayload.picture = resized;
-            }
-            sanitizedPayload.screenSize = {
-                width: 280,
-                height: 240,
-            };
+            
+            sanitizedPayload.picture = sanitizedPayload.pictureUrl;
+            sanitizedPayload.screenSize = { width: 280, height: 240 };
         }
     }
 
-    return {
-        payload: sanitizedPayload,
-        dropped: false,
-    };
+    return { payload: sanitizedPayload, dropped: false };
 }
 
 function readStringField(data: Record<string, unknown>, keys: string[]): string | null {
