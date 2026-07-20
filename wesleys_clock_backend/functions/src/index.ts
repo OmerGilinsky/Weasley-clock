@@ -1,4 +1,4 @@
-import {setGlobalOptions} from "firebase-functions";
+﻿import {setGlobalOptions} from "firebase-functions";
 import { onDocumentCreated, onDocumentUpdated, onDocumentDeleted} from "firebase-functions/v2/firestore";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import * as logger from "firebase-functions/logger"; 
@@ -408,10 +408,10 @@ export const onUserCreated = onDocumentCreated("users/{userId}",
       logger.error("Failed to fetch allowed locations with GPS from DB", err);
     }
 
-    // Comparison: If the app-provided location is missing or not in Admin settings, fallback to Unknown Location
+        // If the app-provided location is missing or not in Admin settings, store null.
     if (!finalLocation || !allowedLocationNames.includes(finalLocation)) {
-      logger.warn(`[Location Warning] User ${finalName} provided location '${finalLocation}' which is not mapped with GPS. Fallback to 'Unknown Location'.`);
-      finalLocation = "Unknown Location";
+            logger.warn(`[Location Warning] User ${finalName} provided location '${finalLocation}' which is not mapped with GPS. Falling back to null.`);
+            finalLocation = null;
     }
 
     try {
@@ -558,7 +558,7 @@ export const onLocationCreated = onDocumentCreated("locations/{locationId}",
  * Trigger: Fires when an existing user document is updated.
  * Purpose 1: Detects location changes, fetches the matching location screen number, and updates targetScreenNumber.
  * Purpose 2: Trigger Queued Messages - Checks if the user arrived "HOME" and releases relevant pending messages.
- * NEW: Validates location against allowed locations and reverts to "Unknown Location" if invalid.
+ * NEW: Validates location against allowed locations and reverts to null if invalid.
  */
 export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (event) => {
     const change = event.data;
@@ -581,10 +581,30 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
 
     logger.log(`User ${event.params.userId} changed location from '${beforeLocation}' to '${afterLocation}'`);
 
-    // If the new location is empty, missing, or already "Unknown Location", handle gracefully and exit
-    if (!afterLocation || afterLocation === "Unknown Location") {
-        logger.log("Location is empty or Unknown. Setting targetScreenNumber to default (0).");
-        await change.after.ref.set({ targetScreenNumber: 0, currentLocation: "Unknown Location" }, { merge: true });
+    // If location is cleared (null/empty), move the hand off-screen and keep location as null.
+    if (!afterLocation) {
+        const afterDataMap = afterData as Record<string, unknown>;
+        const userId = event.params.userId;
+        const handNumber = readNumericField(afterDataMap, ["handNumber"]);
+        const targetScreenNumber = readNumericField(afterDataMap, ["targetScreenNumber"]);
+
+        logger.log("Location is empty. Setting currentLocation to null and targetScreenNumber to -1.");
+
+        if (afterLocation !== null || targetScreenNumber !== -1) {
+            await change.after.ref.set({ targetScreenNumber: -1, currentLocation: null }, { merge: true });
+        }
+
+        await enqueueEsp32Event({
+            eventType: "move_clock_hand",
+            userId,
+            handNumber: handNumber === null ? undefined : handNumber,
+            payload: {
+                handNumber,
+                screenNumber: -1,
+            },
+            sourceCollection: "users",
+            sourceId: userId,
+        });
         return;
     }
 
@@ -593,14 +613,14 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
         const locationsRef = db.collection("locations");
         const snapshot = await locationsRef.where("locationName", "==", afterLocation).limit(1).get();
 
-        let targetScreenNumber = 0;
-        let finalLocation = afterLocation; // Assume valid until proven otherwise
+        let targetScreenNumber = -1;
+        let finalLocation: string | null = typeof afterLocation === "string" && afterLocation.trim() !== "" ? afterLocation : null;
         let locationDataForQueue: Record<string, unknown> | null = null;
 
         if (snapshot.empty) {
-            // FIX: If location is not in the list, force it to 'Unknown Location'
-            logger.warn(`Location '${afterLocation}' not found in locations collection. Reverting to 'Unknown Location'.`);
-            finalLocation = "Unknown Location"; 
+            // If location is not in the list, force it to null and move hand to -1.
+            logger.warn(`Location '${afterLocation}' not found in locations collection. Reverting to null.`);
+            finalLocation = null;
         } else {
             const locationDoc = snapshot.docs[0].data() as Record<string, unknown>;
             locationDataForQueue = locationDoc;
@@ -609,7 +629,8 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
                 targetScreenNumber = locationScreenNumber;
                 logger.log(`Found location '${afterLocation}' with screenNumber ${targetScreenNumber}`);
             } else {
-                logger.warn(`Location '${afterLocation}' found but is missing a valid screen number. Using 0.`);
+                logger.warn(`Location '${afterLocation}' found but is missing a valid screen number. Reverting to null and -1.`);
+                finalLocation = null;
             }
         }
 
@@ -626,7 +647,7 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
         const handNumber = readNumericField(afterDataMap, ["handNumber"]);
         const fallbackScreen = handNumber !== null ? handNumber : undefined;
 
-        if (finalLocation !== "Unknown Location" && locationDataForQueue) {
+        if (finalLocation && locationDataForQueue) {
             const screen = readLocationScreenNumber(locationDataForQueue) ?? fallbackScreen;
             const locationSoundUrl = readLocationSoundUrl(locationDataForQueue);
             const userVoiceUrl = readAudioUrl(afterDataMap);
@@ -668,7 +689,20 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
                 payload: {
                     handNumber,
                     screenNumber: targetScreenNumber,
-                    locationName: finalLocation,
+                    locationName: finalLocation ?? null,
+                },
+                sourceCollection: "users",
+                sourceId: userId,
+            });
+        } else {
+            await enqueueEsp32Event({
+                eventType: "move_clock_hand",
+                userId,
+                handNumber: handNumber === null ? undefined : handNumber,
+                payload: {
+                    handNumber,
+                    screenNumber: -1,
+                    locationName: null,
                 },
                 sourceCollection: "users",
                 sourceId: userId,
@@ -807,17 +841,33 @@ export const onLocationDeleted = onDocumentDeleted("locations/{locationId}", asy
         // 2. Update all affected users, if any
         if (!usersSnapshot.empty) {
             const batch = db.batch();
+            const queueMoves: Promise<string>[] = [];
 
             usersSnapshot.docs.forEach((doc) => {
                 logger.log(`Preparing location reset for user ID: ${doc.id}`);
+                const userData = doc.data() as Record<string, unknown>;
+                const handNumber = readNumericField(userData, ["handNumber"]);
 
                 batch.update(doc.ref, {
-                    currentLocation: "Unknown Location",
-                    targetScreenNumber: 0,
+                    currentLocation: null,
+                    targetScreenNumber: -1,
                 });
+
+                queueMoves.push(enqueueEsp32Event({
+                    eventType: "move_clock_hand",
+                    userId: doc.id,
+                    handNumber: handNumber === null ? undefined : handNumber,
+                    payload: {
+                        handNumber,
+                        screenNumber: -1,
+                    },
+                    sourceCollection: "users",
+                    sourceId: doc.id,
+                }));
             });
 
             await batch.commit();
+            await Promise.all(queueMoves);
             logger.log(`Successfully updated ${usersSnapshot.size} users following the deletion of '${deletedLocationName}'.`);
         } else {
             logger.log(`No users were found with currentLocation == '${deletedLocationName}'.`);
@@ -1062,7 +1112,7 @@ async function processVisualGreeting(
         const handNumber = readNumericField(userData, ["handNumber"]);
         let screen: string | number | null = handNumber;
 
-        if (currentLocation && currentLocation !== "Unknown Location") {
+        if (currentLocation) {
             const locationSnapshot = await db.collection("locations")
                 .where("locationName", "==", currentLocation)
                 .limit(1)
@@ -1087,7 +1137,7 @@ async function processVisualGreeting(
             payload: {
                 screen,
                 pictureUrl: imageUrl,
-                locationName: currentLocation ?? "Unknown Location",
+                locationName: currentLocation ?? null,
             },
             sourceCollection,
             sourceId: greetingId,
@@ -1135,7 +1185,7 @@ export const onVisualMessageCreated = onDocumentCreated("visual_messages/{messag
 /**
  * Scheduled Function: checkAndPromptMissingUpdates
  * Triggers automatically twice a day (e.g., 08:00 and 16:00 Israel time).
- * Purpose: Scans for users with "Unknown Location" or stale updates and sends them a push notification.
+ * Purpose: Scans for users with null/empty locations or stale updates and sends them a push notification.
  */
 export const checkAndPromptMissingUpdates = onSchedule(
     {
@@ -1164,7 +1214,7 @@ export const checkAndPromptMissingUpdates = onSchedule(
             usersSnapshot.forEach((doc) => {
                 const userData = doc.data();
                 const userName = userData.fullName || "User";
-                const currentLocation = userData.currentLocation || "Unknown Location";
+                const currentLocation = typeof userData.currentLocation === "string" ? userData.currentLocation : null;
                 
                 // CRITICAL FIELDS EXPECTED FROM FLUTTER APP:
                 const fcmToken = userData.fcmToken; // The Firebase Cloud Messaging token for the device
@@ -1173,7 +1223,7 @@ export const checkAndPromptMissingUpdates = onSchedule(
                 let needsAlert = false;
 
                 // Condition 1: Location is explicitly unknown
-                if (currentLocation === "Unknown Location" || currentLocation === "Unknown") {
+                if (!currentLocation) {
                     needsAlert = true;
                     logger.log(`User '${userName}' has an unknown location.`);
                 } 
@@ -1222,8 +1272,8 @@ export const checkAndPromptMissingUpdates = onSchedule(
  * Scheduled Function: flagStaleLocations
  * Triggers automatically every hour at minute 0.
  * Purpose: Scans for users who haven't updated their location in over 12 hours.
- * If a location is stale, it automatically reverts the user to "Unknown Location" 
- * and resets their target screen number to 0.
+ * If a location is stale, it automatically reverts the user to null
+ * and resets their target screen number to -1.
  */
 export const flagStaleLocations = onSchedule(
     {
@@ -1245,52 +1295,68 @@ export const flagStaleLocations = onSchedule(
             const STALE_THRESHOLD_MS = 12 * 60 * 60 * 1000;
             const nowMs = Date.now();
             
-            // Use a batch write to efficiently update multiple users at once
+            // Use a batch write to efficiently update multiple users at once.
             const batch = db.batch();
             let staleCount = 0;
 
-            usersSnapshot.forEach((doc) => {
+            for (const doc of usersSnapshot.docs) {
                 const userData = doc.data();
                 const userName = userData.fullName || "Unknown User";
-                const currentLocation = userData.currentLocation;
-                const lastUpdatedTimestamp = userData.lastLocationUpdateTime;
+                const currentLocation = typeof userData.currentLocation === "string" ? userData.currentLocation : null;
+                const lastUpdatedTimestamp = userData.lastLocationUpdateTime ?? userData.lastUpdated;
 
-                // If the user is already at an Unknown Location, skip them to save operations
-                if (!currentLocation || currentLocation === "Unknown Location") {
-                    return; 
+                // If the user is already at no location, skip them to save operations.
+                if (!currentLocation) {
+                    continue;
                 }
 
-                // Check if the timestamp exists and calculate the difference
+                // Rule #2: Only apply the 12-hour stale reset when the location has no GPS coordinates.
+                const locationSnapshot = await db.collection("locations")
+                    .where("locationName", "==", currentLocation)
+                    .limit(1)
+                    .get();
+
+                let locationHasGps = false;
+                if (!locationSnapshot.empty) {
+                    const locationData = locationSnapshot.docs[0].data() as Record<string, unknown>;
+                    const latitude = readNumericField(locationData, ["latitude", "lat"]);
+                    const longitude = readNumericField(locationData, ["longitude", "lng", "lon"]);
+                    locationHasGps = latitude !== null && longitude !== null;
+                }
+
+                if (locationHasGps) {
+                    continue;
+                }
+
+                // Check if the timestamp exists and calculate the difference.
                 if (lastUpdatedTimestamp) {
                     const lastUpdatedMs = lastUpdatedTimestamp.toDate().getTime();
                     const timeDifference = nowMs - lastUpdatedMs;
 
                     if (timeDifference > STALE_THRESHOLD_MS) {
-                        logger.log(`User '${userName}' has a stale location (Over 12 hours). Reverting to Unknown Location.`);
-                        
-                        // Add the update operation to the batch
+                        logger.log(`User '${userName}' has a stale non-GPS location (Over 12 hours). Reverting to null.`);
+
                         batch.update(doc.ref, {
-                            currentLocation: "Unknown Location",
-                            targetScreenNumber: 0
+                            currentLocation: null,
+                            targetScreenNumber: -1,
                         });
                         staleCount++;
                     }
                 } else {
-                    // Edge Case: If the user has a location but NO timestamp was ever recorded, 
-                    // we flag them as stale for safety.
-                    logger.warn(`User '${userName}' has a set location but no 'lastLocationUpdateTime'. Reverting to Unknown Location.`);
+                    // If the location has no GPS and no update timestamp, clear it for safety.
+                    logger.warn(`User '${userName}' has a non-GPS location but no update timestamp. Reverting to null.`);
                     batch.update(doc.ref, {
-                        currentLocation: "Unknown Location",
-                        targetScreenNumber: 0
+                        currentLocation: null,
+                        targetScreenNumber: -1,
                     });
                     staleCount++;
                 }
-            });
+            }
 
             // Commit the batch to the database if we found any stale users
             if (staleCount > 0) {
                 await batch.commit();
-                logger.log(`Successfully reset ${staleCount} stale user(s) to Unknown Location.`);
+                logger.log(`Successfully reset ${staleCount} stale user(s) to null location.`);
             } else {
                 logger.log("All user locations are up to date. No stale locations found.");
             }
