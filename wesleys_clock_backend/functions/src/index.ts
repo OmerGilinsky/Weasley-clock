@@ -1756,8 +1756,7 @@ export const popNextEsp32Event = onRequest(async (request, response) => {
 
             const query = db.collection(ESP32_QUEUE_COLLECTION)
                 .where("status", "==", "pending")
-                .orderBy("sequence", "asc")
-                .limit(1);
+                .limit(50);
 
             const queueSnapshot = await transaction.get(query);
             if (queueSnapshot.empty) {
@@ -1766,11 +1765,24 @@ export const popNextEsp32Event = onRequest(async (request, response) => {
                 };
             }
 
-            const eventDoc = queueSnapshot.docs[0];
-            const eventData = eventDoc.data() as Record<string, unknown>;
-            const sequence = typeof eventData.sequence === "number" ? eventData.sequence : null;
+            const eventDoc = queueSnapshot.docs
+                .map((doc) => ({
+                    doc,
+                    data: doc.data() as Record<string, unknown>,
+                }))
+                .filter(({data}) => typeof data.sequence === "number")
+                .sort((left, right) => (left.data.sequence as number) - (right.data.sequence as number))[0];
+
+            if (!eventDoc) {
+                return {
+                    status: "empty" as const,
+                };
+            }
+
+            const eventData = eventDoc.data;
+            const sequence = eventData.sequence as number;
             if (sequence === null) {
-                transaction.update(eventDoc.ref, {
+                transaction.update(eventDoc.doc.ref, {
                     status: "failed",
                     lastError: "Missing sequence",
                     completedAt: FieldValue.serverTimestamp(),
@@ -1780,13 +1792,13 @@ export const popNextEsp32Event = onRequest(async (request, response) => {
                 };
             }
 
-            transaction.update(eventDoc.ref, {
+            transaction.update(eventDoc.doc.ref, {
                 status: "processing",
                 claimedAt: FieldValue.serverTimestamp(),
             });
 
             transaction.set(ESP32_QUEUE_STATE_DOC, {
-                inFlightEventDocId: eventDoc.id,
+                inFlightEventDocId: eventDoc.doc.id,
                 inFlightSequence: sequence,
                 deviceAvailable: false,
                 lastDispatchAt: FieldValue.serverTimestamp(),
@@ -1795,7 +1807,7 @@ export const popNextEsp32Event = onRequest(async (request, response) => {
 
             return {
                 status: "ok" as const,
-                eventDocId: eventDoc.id,
+                eventDocId: eventDoc.doc.id,
                 eventData,
                 sequence,
             };
@@ -1876,7 +1888,6 @@ export const completeEsp32Event = onRequest(async (request, response) => {
                 } else {
                     const query = db.collection(ESP32_QUEUE_COLLECTION)
                         .where("sequence", "==", sequenceId)
-                        .orderBy("createdAt", "desc")
                         .limit(1);
                     const result = await transaction.get(query);
                     if (!result.empty) {
