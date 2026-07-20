@@ -64,6 +64,7 @@ SPIClass SD_SPI(HSPI);
 TFT_eSPI tft = TFT_eSPI();
 
 Audio audio;
+bool audioPlaying = false; 
 
 uint8_t currentTargetCS = TFT_CS1;
 uint8_t displays[] = {TFT_CS1, TFT_CS2, TFT_CS3, TFT_CS4};
@@ -252,7 +253,6 @@ void setup() {
 
   audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
   audio.setVolume(10);
-  audio.connecttoFS(SD, "/Title.mp3");
   audio.setFileLoop(true);
 
   Serial.println("Audio are set");
@@ -261,5 +261,27 @@ void setup() {
 }
 
 void loop() {
-  audio.loop();
+  audio.connecttoFS(SD, "Avigail.mp3");
+  while (true) {
+    audio.loop();
+    if (audio.isRunning()) {
+      audioPlaying = true;
+    } else if (audioPlaying && !audio.isRunning()) {
+      audio.stopSong();
+      audioPlaying = false;
+      break;
+    }
+  }
+
+  audio.connecttoFS(SD, "song.mp3");
+  while (true) {
+    audio.loop();
+    if (audio.isRunning()) {
+      audioPlaying = true;
+    } else if (audioPlaying && !audio.isRunning()) {
+      audio.stopSong();
+      audioPlaying = false;
+      break;
+    }
+  }
 }

@@ -34,6 +34,8 @@
 #include <Firebase_ESP_Client.h>
 #include <addons/TokenHelper.h>
 #include <addons/RTDBHelper.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
 #include <FS.h>
 #include <SD.h>
 #include <SPI.h>
@@ -42,25 +44,19 @@
 #include <Audio.h>
 #include <ESP32Servo.h>
 
-#define WIFI_SSID "Leonid's Fan Club 2.4"
-#define WIFI_PASSWORD "leonidOS"
+#define WIFI_SSID           "Leonid's Fan Club 2.4"
+#define WIFI_PASSWORD       "leonidOS"
 
-/////////////#define USER_EMAIL
-/////////////#define USER_PASSWORD
+#define USER_EMAIL          "esp32-wesleys@clock.com"
+#define USER_PASSWORD       "123456"
 
-/////////////#define DATABASE_URL "YOUR_FIREBASE_RTDB_URL"
-/////////////#define API_KEY "YOUR_FIREBASE_API_KEY"
+#define DATABASE_URL        "https://wesleys-clock-default-rtdb.firebaseio.com"
+#define API_KEY             "AIzaSyAFCIatremITVZz1iRzOEpH7gUicLCJ8Iw"
+#define POP_NEXT_EVENT_URL  "https://us-central1-wesleys-clock.cloudfunctions.net/popNextEsp32Event"
+#define COMPLETE_EVENT_URL  "https://us-central1-wesleys-clock.cloudfunctions.net/completeEsp32Event"
 
-/////////////#define COUNTER_PATH
-#define FIREBASE_QUEUE 
-#define FIREBASE_STORAGE "wesleys-clock.firebasestorage.app"
-
-FirebaseData counter;
-FirebaseData fbdo;
-FirebaseAuth auth;
-FirebaseConfig config;
-
-volatile bool dataChanged = false;
+#define FIREBASE_COUNTER    "/system_status/esp32_queue_state"
+#define FIREBASE_STORAGE    "wesleys-clock.firebasestorage.app"
 
 #define TFT_CS1     13
 #define TFT_CS2     12
@@ -81,26 +77,30 @@ volatile bool dataChanged = false;
 #define servo_PWM3  22
 #define servo_PWM4  32
 
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+volatile bool dataChanged = false;
+
 SPIClass SD_SPI(HSPI);
 
 TFT_eSPI tft = TFT_eSPI();
 
-Audio audio;
-bool audioPlaying = false; 
-
 uint8_t currentTargetCS = TFT_CS1;
 uint8_t displays[] = {TFT_CS1, TFT_CS2, TFT_CS3, TFT_CS4};
+
+char* images[] = {"", "", "", ""};
+
+Audio audio;
+bool audioPlaying = false; 
 
 Servo servoMotor1;
 Servo servoMotor2;
 Servo servoMotor3;
 Servo servoMotor4;
 
-Servo hands[] = {servoMotor1, servoMotor2, servoMotor3, servoMotor4}
-
-char* images[] = {"", "", "", ""};
-char* locations[] = {"", "", "", ""};
-char* names[] = {"", "", "", ""};
+Servo hands[] = {servoMotor1, servoMotor2, servoMotor3, servoMotor4};
 
 int angles1[] = {22, 1, 45, 96, 143};
 int angles2[] = {22, 0, 48, 94, 141};
@@ -141,8 +141,8 @@ void streamTimeoutCallback(bool timeout)
   if (timeout)
     Serial.println("stream timed out, resuming...\n");
 
-  if (!counter.httpConnected())
-    Serial.printf("error code: %d, reason: %s\n\n", counter.httpCode(), counter.errorReason().c_str());
+  if (!fbdo.httpConnected())
+    Serial.printf("error code: %d, reason: %s\n\n", fbdo.httpCode(), fbdo.errorReason().c_str());
 }
 
 void setup() {
@@ -172,12 +172,12 @@ void setup() {
   Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(true);
 
-  if (!Firebase.RTDB.beginStream(&counter, "/counter"))
-    Serial.printf("stream begin error, %s\n\n", counter.errorReason().c_str());
+  if (!Firebase.RTDB.beginStream(&fbdo, "/counter"))
+    Serial.printf("stream begin error, %s\n\n", fbdo.errorReason().c_str());
 
-  Firebase.RTDB.setStreamCallback(&counter, streamCallback, streamTimeoutCallback);
+  Firebase.RTDB.setStreamCallback(&fbdo, streamCallback, streamTimeoutCallback);
 
-  Serial.printf("Connected to " + COUNTER_PATH);
+  Serial.printf("Connected to " + FIREBASE_COUNTER);
   Serial.println();
 
   SD_SPI.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
@@ -245,39 +245,35 @@ void setup() {
   Serial.println();
 }
 
-//display - the one used to represent the location
-//image - 280x240 jpg epresenting the location
-//location - mp3 of the name of the location
-bool update_location(uint8_t display, char* image, char* location) {
-  if (location == "") {
+//display, int{0-4} - the one used to represent the location
+//image, char* - 280x240 jpg epresenting the location
+void update_display(int display, const char* image) {
+  if (image == nullptr) {
     Serial.println("Removing location from display " + display);
+
+    tft.fillScreen(TFT_BLACK);
+
+    SD.remove(images[display]);
+    images[display] = "";
+
   } else {
-    Serial.println("Updating location " + location + " with image " + image + " on display " + display);
+    Serial.println("Updating display " + display + " with image " + image);
 
     Firebase.ready();
 
     Firebase.Storage.download(&fbdo, FIREBASE_STORAGE, image, image, mem_storage_type_sd);
 
-    Firebase.ready();
-
-    Firebase.Storage.download(&fbdo, FIREBASE_STORAGE, location, location, mem_storage_type_sd);
-
     targetDisplay(displays[display]);
     TJpgDec.drawFsJpg(0, 0, image, SD);
+
+    SD.remove(images[display]);
+    images[display] = image;
   }
-
-  SD.remove(images[display]);
-  images[display] = image;
-
-  SD.remove(locations[display]);
-  locations[display] = location;
-
-  return 1;
 }
 
-//display - the one used to show the picture
-//picture - jpg to be shown for 5 seconds
-bool show_picture(uint8_t display, char* picture) {
+//display, int{0-4} - the one used to show the picture
+//picture, char* - jpg to be shown for 5 seconds
+void show_picture(int display, const char* picture) {
   Serial.println("Showing picture " + picture + " on display " + display);
 
   Firebase.ready();
@@ -290,82 +286,23 @@ bool show_picture(uint8_t display, char* picture) {
   TJpgDec.drawFsJpg(0, 0, images[display], SD);
 
   SD.remove(picture);
-  return 1;
 }
 
-//hand - the one to represent the person
-//name - mp3 of the name of the person
-bool update_name(uint8_t hand, char* name) {
-  if (name = "") {
-    Serial.println("Removing name from hand " + hand);
-  } else {
-    Serial.println("Updating name " + name + " on hand " + hand);
-
-    Firebase.ready();
-
-    Firebase.Storage.download(&fbdo, FIREBASE_STORAGE, name, name, mem_storage_type_sd);
-
-    SD.remove(names[hand]);
-  }
-
-  names[hand] = name;
-
-  return 1;
-}
-
-//hand - the one represting the person that moved locations
-//display - the one that represent the location the person moved to
-bool move_hand(uint8_t hand, uint8_t display) {
+//hand, int{1-4} - the one represting the person that moved locations
+//display, int{0-4} - the one that represent the location the person moved to
+void move_hand(int hand, int display) {
   Serial.println("Moving hand " + hand + " to display " + display);
 
-  switch(display) {
+  switch(hand) {
     case 1: hands[hand].write(angles1[display]); break;
     case 2: hands[hand].write(angles2[display]); break;
     case 3: hands[hand].write(angles3[display]); break;
     case 4: hands[hand].write(angles4[display]); break;
   }
-
-  audio.connecttoFS(SD, names[hand]);
-  while (true) {
-    audio.loop();
-    if (audio.isRunning()) {
-      audioPlaying = true;
-    } else if (audioPlaying && !audio.isRunning()) {
-      audio.stopSong();
-      audioPlaying = false;
-      break;
-    }
-  }
-
-  audio.connecttoFS(SD, "/arrived_to.mp3");
-  while (true) {
-    audio.loop();
-    if (audio.isRunning()) {
-      audioPlaying = true;
-    } else if (audioPlaying && !audio.isRunning()) {
-      audio.stopSong();
-      audioPlaying = false;
-      break;
-    }
-  }
-
-  audio.connecttoFS(SD, locations[hand]);
-  while (true) {
-    audio.loop();
-    if (audio.isRunning()) {
-      audioPlaying = true;
-    } else if (audioPlaying && !audio.isRunning()) {
-      audio.stopSong();
-      audioPlaying = false;
-      break;
-    }
-  }
-
-  return 1;
 }
 
-//sound - mp3 to play fully as a messege
-bool play_sound(char* sound) {
+//sound, char* - mp3 to play fully as a messege
+void play_sound(const char* sound) {
   Serial.println("Playing sound " + sound);
 
   Firebase.ready();
@@ -385,8 +322,108 @@ bool play_sound(char* sound) {
   }
 
   SD.remove(sound);
+}
 
-  return 1;
+bool fetchAndExecuteNextEvent() {
+  HTTPClient httpPop;
+  httpPop.begin(POP_NEXT_EVENT_URL);
+
+  int httpPopResponseCode = httpPop.GET();
+  bool moreEvents = false;
+
+  if (httpPopResponseCode > 0) {
+    String jsonResponse = httpPop.getString();
+    Serial.println("Received JSON: " + jsonResponse);
+
+    JsonDocument doc; 
+    DeserializationError error = deserializeJson(doc, jsonResponse);
+
+    if (error) {
+      Serial.print("deserializeJson() failed: ");
+      Serial.println(error.c_str());
+      httpPop.end();
+      return false; // Break the while loop
+    }
+
+    const char* status = doc["status"]; 
+
+    if (String(status) == "ok") {
+      const char* eventType = doc["event"]["eventType"];
+      int eventId = doc["event"]["id"];
+      const char* queueDocId = doc["event"]["queueDocId"];
+
+      Serial.print("Event Type: ");
+      Serial.println(eventType);
+
+      if (String(eventType) == "move_clock_hand") {
+        int handNumber = doc["event"]["payload"]["handNumber"];
+        int screenNumber = doc["event"]["payload"]["screenNumber"];
+        
+        move_hand(handNumber, screenNumber);
+      } 
+      else if (String(eventType) == "update_display") {
+        int screenNumber = doc["event"]["payload"]["screenNumber"];
+        const char* picture = doc["event"]["payload"]["picture"];
+        
+        update_display(screenNumber, picture);
+      }
+      else if (String(eventType) == "play_picture") {
+        int screenNumber = doc["event"]["payload"]["screenNumber"];
+        const char* pictureUrl = doc["event"]["payload"]["pictureUrl"];
+        
+        show_picture(screenNumber, pictureUrl);
+      }
+      else if (String(eventType) == "play_voice") {
+        const char* pictureUrl = doc["event"]["payload"]["audioUrl"];
+        
+        play_sound(sound)
+      }
+      
+      HTTPClient httpComplete;
+      httpComplete.begin(COMPLETE_EVENT_URL);
+      httpComplete.addHeader("Content-Type", "application/json");
+
+      // Build the JSON payload to send back to the server
+      JsonDocument completeDoc;
+      completeDoc["eventId"] = queueDocId; 
+      completeDoc["sequenceId"] = eventId; 
+      completeDoc["status"] = "success";
+      completeDoc["errorMessage"] = nullptr;
+      
+      String requestBody;
+      serializeJson(completeDoc, requestBody);
+
+      // Send the POST request
+      int completeResponseCode = httpComplete.POST(requestBody);
+      
+      if (completeResponseCode > 0) {
+        Serial.printf("Successfully completed event %d. Server responded: %d\n", eventId, completeResponseCode);
+      } else {
+        Serial.printf("Failed to complete event %d. Error code: %d\n", eventId, completeResponseCode);
+      }
+      
+      httpComplete.end();
+      
+      moreEvents = true; // Tell the while loop to run again for the next item
+    } 
+    else if (String(status) == "empty") {
+      Serial.println("Queue is empty. Done processing.");
+      moreEvents = false; // Stop the loop
+    } 
+    else if (String(status) == "wait") {
+      Serial.println("Device is busy or unavailable. Waiting.");
+      moreEvents = false; // Stop the loop
+    }
+  } 
+  else {
+    Serial.print("Error code on HTTP Request: ");
+    Serial.println(httpPopResponseCode);
+    moreEvents = false; // Error occurred, break the loop
+  }
+
+  httpPop.end();
+
+  return moreEvents;
 }
 
 void loop() {
@@ -396,6 +433,12 @@ void loop() {
   {
     dataChanged = false;
 
+    bool keepExecuting = true;
+
+    while (keepExecuting) {
+      keepExecuting = fetchAndExecuteNextEvent();
+      delay(500);
+    }
     
   }
 }
