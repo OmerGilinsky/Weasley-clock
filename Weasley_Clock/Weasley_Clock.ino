@@ -55,7 +55,7 @@
 #define POP_NEXT_EVENT_URL  "https://us-central1-wesleys-clock.cloudfunctions.net/popNextEsp32Event"
 #define COMPLETE_EVENT_URL  "https://us-central1-wesleys-clock.cloudfunctions.net/completeEsp32Event"
 
-#define FIREBASE_COUNTER    "/system_status/esp32_queue_state"
+#define FIREBASE_COUNTER    ""
 #define FIREBASE_STORAGE    "wesleys-clock.firebasestorage.app"
 
 #define TFT_CS1     13
@@ -77,6 +77,7 @@
 #define servo_PWM3  22
 #define servo_PWM4  32
 
+FirebaseData counter;
 FirebaseData fbdo;
 FirebaseAuth auth;
 FirebaseConfig config;
@@ -141,8 +142,8 @@ void streamTimeoutCallback(bool timeout)
   if (timeout)
     Serial.println("stream timed out, resuming...\n");
 
-  if (!fbdo.httpConnected())
-    Serial.printf("error code: %d, reason: %s\n\n", fbdo.httpCode(), fbdo.errorReason().c_str());
+  if (!counter.httpConnected())
+    Serial.printf("error code: %d, reason: %s\n\n", counter.httpCode(), counter.errorReason().c_str());
 }
 
 void setup() {
@@ -236,13 +237,16 @@ void setup() {
   Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(true);
 
-  if (!Firebase.RTDB.beginStream(&fbdo, FIREBASE_COUNTER))
-    Serial.printf("stream begin error, %s\n\n", fbdo.errorReason().c_str());
+  if (!Firebase.RTDB.beginStream(&counter, FIREBASE_COUNTER))
+    Serial.printf("stream begin error, %s\n\n", counter.errorReason().c_str());
 
-  Firebase.RTDB.setStreamCallback(&fbdo, streamCallback, streamTimeoutCallback);
+  Firebase.RTDB.setStreamCallback(&counter, streamCallback, streamTimeoutCallback);
 
   Serial.print("Connected to ");
   Serial.print(FIREBASE_COUNTER);
+  Serial.println();
+
+  Serial.println("Moving to loop");
   Serial.println();
 }
 
@@ -440,6 +444,10 @@ bool fetchAndExecuteNextEvent() {
 
 void loop() {
   Firebase.ready();
+
+  if (!Firebase.RTDB.readStream(&counter)) {
+    Serial.println("No stream");
+  }
 
   if (dataChanged)
   {
