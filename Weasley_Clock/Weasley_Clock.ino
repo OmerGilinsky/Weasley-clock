@@ -90,7 +90,7 @@ TFT_eSPI tft = TFT_eSPI();
 uint8_t currentTargetCS = TFT_CS1;
 uint8_t displays[] = {TFT_CS1, TFT_CS2, TFT_CS3, TFT_CS4};
 
-char* images[] = {"", "", "", ""};
+const char* images[] = {"", "", "", ""};
 
 Audio audio;
 bool audioPlaying = false; 
@@ -147,38 +147,6 @@ void streamTimeoutCallback(bool timeout)
 
 void setup() {
   Serial.begin(115200);
-
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connecting to Wi-Fi");
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    Serial.print(".");
-    delay(300);
-  }
-  Serial.println();
-  Serial.print("Connected with IP: ");
-  Serial.println(WiFi.localIP());
-  Serial.println();
-
-  Serial.printf("Connecting to Firebase");
-
-  config.api_key = API_KEY;
-  auth.user.email = USER_EMAIL;
-  auth.user.password = USER_PASSWORD;
-  config.database_url = DATABASE_URL;
-
-  config.token_status_callback = tokenStatusCallback;
-
-  Firebase.begin(&config, &auth);
-  Firebase.reconnectWiFi(true);
-
-  if (!Firebase.RTDB.beginStream(&fbdo, "/counter"))
-    Serial.printf("stream begin error, %s\n\n", fbdo.errorReason().c_str());
-
-  Firebase.RTDB.setStreamCallback(&fbdo, streamCallback, streamTimeoutCallback);
-
-  Serial.printf("Connected to " + FIREBASE_COUNTER);
-  Serial.println();
 
   SD_SPI.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
 
@@ -243,13 +211,47 @@ void setup() {
 
   Serial.println("Aligned servos");
   Serial.println();
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.print(".");
+    delay(300);
+  }
+  Serial.println();
+  Serial.print("Connected with IP: ");
+  Serial.println(WiFi.localIP());
+  Serial.println();
+
+  Serial.print("Connecting to Firebase");
+
+  config.api_key = API_KEY;
+  auth.user.email = USER_EMAIL;
+  auth.user.password = USER_PASSWORD;
+  config.database_url = DATABASE_URL;
+
+  config.token_status_callback = tokenStatusCallback;
+
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+
+  if (!Firebase.RTDB.beginStream(&fbdo, FIREBASE_COUNTER))
+    Serial.printf("stream begin error, %s\n\n", fbdo.errorReason().c_str());
+
+  Firebase.RTDB.setStreamCallback(&fbdo, streamCallback, streamTimeoutCallback);
+
+  Serial.print("Connected to ");
+  Serial.print(FIREBASE_COUNTER);
+  Serial.println();
 }
 
 //display, int{0-4} - the one used to represent the location
 //image, char* - 280x240 jpg epresenting the location
 void update_display(int display, const char* image) {
   if (image == nullptr) {
-    Serial.println("Removing location from display " + display);
+    Serial.print("Removing location from display ");
+    Serial.println(display);
 
     tft.fillScreen(TFT_BLACK);
 
@@ -257,7 +259,10 @@ void update_display(int display, const char* image) {
     images[display] = "";
 
   } else {
-    Serial.println("Updating display " + display + " with image " + image);
+    Serial.print("Updating display ");
+    Serial.print(display);
+    Serial.print(" with image ");
+    Serial.println(image);
 
     Firebase.ready();
 
@@ -274,7 +279,10 @@ void update_display(int display, const char* image) {
 //display, int{0-4} - the one used to show the picture
 //picture, char* - jpg to be shown for 5 seconds
 void show_picture(int display, const char* picture) {
-  Serial.println("Showing picture " + picture + " on display " + display);
+  Serial.print("Showing picture ");
+  Serial.print(picture);
+  Serial.print(" on display ");
+  Serial.println(display);
 
   Firebase.ready();
 
@@ -291,7 +299,10 @@ void show_picture(int display, const char* picture) {
 //hand, int{1-4} - the one represting the person that moved locations
 //display, int{0-4} - the one that represent the location the person moved to
 void move_hand(int hand, int display) {
-  Serial.println("Moving hand " + hand + " to display " + display);
+  Serial.print("Moving hand ");
+  Serial.print(hand);
+  Serial.print(" to display ");
+  Serial.println(display);
 
   switch(hand) {
     case 1: hands[hand].write(angles1[display]); break;
@@ -303,7 +314,8 @@ void move_hand(int hand, int display) {
 
 //sound, char* - mp3 to play fully as a messege
 void play_sound(const char* sound) {
-  Serial.println("Playing sound " + sound);
+  Serial.print("Playing sound ");
+  Serial.println(sound);
 
   Firebase.ready();
 
@@ -374,9 +386,9 @@ bool fetchAndExecuteNextEvent() {
         show_picture(screenNumber, pictureUrl);
       }
       else if (String(eventType) == "play_voice") {
-        const char* pictureUrl = doc["event"]["payload"]["audioUrl"];
+        const char* audioUrl = doc["event"]["payload"]["audioUrl"];
         
-        play_sound(sound)
+        play_sound(audioUrl);
       }
       
       HTTPClient httpComplete;
@@ -432,6 +444,8 @@ void loop() {
   if (dataChanged)
   {
     dataChanged = false;
+
+    Serial.println("Queue change recognized");
 
     bool keepExecuting = true;
 
