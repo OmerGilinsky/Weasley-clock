@@ -445,27 +445,22 @@ export const onUserCreated = onDocumentCreated("users/{userId}",
 
         // Handle edge cases and allocate using set and merge (including protected name and location)
         if (assignedHand === null) {
-          logger.log(`No hand for ${finalName} (${userId}). Waiting list.`);
-          transaction.set(snapshot.ref, {
+                throw new Error(`No free physical hand available for user ${userId}. Aborting creation.`);
+            }
+
+            transaction.set(snapshot.ref, {
             fullName: finalName, 
-            currentLocation: finalLocation, // Updates to the safe/corrected location
-                        handNumber: null,
-            status: "waiting_list",
-          }, { merge: true });
-        } else {
-          logger.log(`Assigning hand ${assignedHand} to ${finalName}`);
-          transaction.set(snapshot.ref, {
-            fullName: finalName, 
-            currentLocation: finalLocation, // Updates to the safe/corrected location
+            currentLocation: finalLocation,
             handNumber: assignedHand,
             status: "active",
-          }, { merge: true });
-        }
-      });
+            }, { merge: true });
+        });
 
       logger.log(`Transaction completed successfully for user ${userId}`);
     } catch (error) {
       logger.error("Transaction failed critically: ", error);
+      // Optional: If you want to delete the invalid doc that was just created:
+      await snapshot.ref.delete();
     }
   }
 );
@@ -516,9 +511,7 @@ export const onLocationCreated = onDocumentCreated("locations/{locationId}",
                 }
 
                 if (assignedScreenNumber === null) {
-                    logger.warn(`No free screen slot for location ${locationId}. Setting screenNumber to null.`);
-                } else {
-                    logger.log(`Assigning screenNumber ${assignedScreenNumber} to location ${locationId}`);
+                    throw new Error(`No free screen slot available for location ${locationId}. Aborting creation.`);
                 }
 
                 const updates: Record<string, unknown> = {
@@ -548,6 +541,7 @@ export const onLocationCreated = onDocumentCreated("locations/{locationId}",
             }
         } catch (error) {
             logger.error("Failed to auto-assign location screen number:", error);
+            await snapshot.ref.delete();
         }
     }
 );
