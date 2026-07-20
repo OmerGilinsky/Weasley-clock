@@ -10,6 +10,7 @@ import {join} from "node:path";
 import {writeFile, unlink} from "node:fs/promises";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { getDatabase } from "firebase-admin/database";
 import { getStorage } from "firebase-admin/storage";
 import { getMessaging } from "firebase-admin/messaging";
 import { onCall, HttpsError } from "firebase-functions/v2/https";
@@ -22,11 +23,13 @@ if (getApps().length === 0) {
     initializeApp();
 }
 const db = getFirestore();
+const rtdb = getDatabase();
 
 setGlobalOptions({maxInstances: 10});
 
 const ESP32_QUEUE_COLLECTION = "esp32_event_queue";
 const ESP32_QUEUE_STATE_DOC = db.collection("system_status").doc("esp32_queue_state");
+const ESP32_QUEUE_STATE_RTDB_PATH = "system_status/esp32_queue_state";
 const MEDIA_CONVERSIONS_COLLECTION = "media_conversions";
 const execFileAsync = promisify(execFile);
 
@@ -302,10 +305,11 @@ async function enqueueEsp32Event(input: QueueEventInput): Promise<string> {
         return "dropped";
     }
 
-    await db.runTransaction(async (transaction) => {
+    const queueState = await db.runTransaction(async (transaction) => {
         const stateSnapshot = await transaction.get(ESP32_QUEUE_STATE_DOC);
         const lastSequence = stateSnapshot.data()?.lastSequence;
         const nextSequence = typeof lastSequence === "number" ? lastSequence + 1 : 1;
+        const deviceAvailable = stateSnapshot.data()?.deviceAvailable ?? true;
 
         const eventDoc: Record<string, unknown> = {
             eventType: input.eventType,
@@ -330,11 +334,19 @@ async function enqueueEsp32Event(input: QueueEventInput): Promise<string> {
 
         transaction.set(ESP32_QUEUE_STATE_DOC, {
             lastSequence: nextSequence,
-            deviceAvailable: stateSnapshot.data()?.deviceAvailable ?? true,
+            deviceAvailable,
             updatedAt: FieldValue.serverTimestamp(),
         }, {merge: true});
 
         transaction.set(eventRef, eventDoc);
+
+        return { nextSequence, deviceAvailable };
+    });
+
+    await rtdb.ref(ESP32_QUEUE_STATE_RTDB_PATH).set({
+        lastSequence: queueState.nextSequence,
+        deviceAvailable: queueState.deviceAvailable,
+        updatedAt: Date.now(),
     });
 
     logger.log(`Queued ESP32 event '${input.eventType}' as ${eventRef.id}`);
