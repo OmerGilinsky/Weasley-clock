@@ -1237,11 +1237,12 @@ export const checkAndPromptMissingUpdates = onSchedule(
                 }
 
                 // If conditions are met AND we have a device token to send the message to
+
                 if (needsAlert && fcmToken) {
                     const message = {
                         notification: {
-                            title: "המשפחה מחכה לדעת איפה את/ה! 🕒",
-                            body: `היי ${userName}, אל תשכח/י לעדכן את המיקום שלך בשעון.`
+                            title: "The family is waiting to know where you are! ",
+                            body: `Hey ${userName}, don't forget to update your location on the clock.`
                         },
                         token: fcmToken
                     };
@@ -1775,8 +1776,8 @@ export const reportHardwareStatus = onRequest(async (request, response) => {
                 if (fcmToken) {
                     const message = {
                         notification: {
-                            title: "⚠️ התראת חומרה: שעון המשפחה",
-                            body: `זוהתה תקלה קריטית: ${errorMessage || errorCode}. נא לבדוק את השעון.`
+                            title: "⚠️ Hardware Alert: Family Clock",
+                            body: `Critical error detected: ${errorMessage || errorCode}. Please check the clock.`
                         },
                         token: fcmToken
                     };
