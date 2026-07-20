@@ -29,7 +29,8 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
   final ImagePicker _imagePicker = ImagePicker();
   static const int _maxManagedUsers = 4;
   static const int _maxLocations = 4;
-  static const double _proximityRadiusMeters = 10;
+  static const double _arrivalRadiusMeters = 10;
+  static const double _exitRadiusMeters = 100;
   Timer? _proximityTimer;
   bool _isCheckingProximity = false;
 
@@ -101,8 +102,10 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
         ),
       );
 
+      final currentLocation = userData['currentLocation'] as String?;
       String? nearestLocation;
       double? nearestDistance;
+      double? currentLocationDistance;
 
       for (final entry in savedLocations.entries) {
         final locationName = entry.key;
@@ -124,26 +127,37 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
           longitude,
         );
 
-        if (distance <= _proximityRadiusMeters &&
+        if (currentLocation == locationName) {
+          currentLocationDistance = distance;
+        }
+
+        if (distance <= _arrivalRadiusMeters &&
             (nearestDistance == null || distance < nearestDistance)) {
           nearestDistance = distance;
           nearestLocation = locationName;
         }
       }
 
-      if (nearestLocation == null) {
+      if (nearestLocation != null) {
+        if (currentLocation == nearestLocation) {
+          return;
+        }
+
+        await userRef.set({
+          'currentLocation': nearestLocation,
+          'lastUpdated': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
         return;
       }
 
-      final currentLocation = userData['currentLocation'] as String?;
-      if (currentLocation == nearestLocation) {
-        return;
+      if (currentLocation != null &&
+          currentLocationDistance != null &&
+          currentLocationDistance > _exitRadiusMeters) {
+        await userRef.set({
+          'currentLocation': null,
+          'lastUpdated': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
       }
-
-      await userRef.set({
-        'currentLocation': nearestLocation,
-        'lastUpdated': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
     } catch (_) {
       // Ignore transient location/Firebase failures; periodic checks continue.
     } finally {

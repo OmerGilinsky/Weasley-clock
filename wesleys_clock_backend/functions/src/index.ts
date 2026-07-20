@@ -240,6 +240,81 @@ function readNumericField(data: Record<string, unknown>, keys: string[]): number
     return null;
 }
 
+function readTimestampMillis(data: Record<string, unknown>, keys: string[]): number | null {
+    for (const key of keys) {
+        const value = data[key];
+        if (
+            value &&
+            typeof value === "object" &&
+            "toDate" in value &&
+            typeof (value as {toDate?: unknown}).toDate === "function"
+        ) {
+            const timestampValue = value as {toDate: () => Date};
+            const millis = timestampValue.toDate().getTime();
+            if (Number.isFinite(millis)) {
+                return millis;
+            }
+        }
+    }
+
+    return null;
+}
+
+function isLocationUnset(value: unknown): boolean {
+    return value === null || value === undefined || (typeof value === "string" && value.trim() === "");
+}
+
+function readUserLocationGpsCoordinates(
+    userData: Record<string, unknown>,
+    locationName: string
+): {latitude: number; longitude: number} | null {
+    const savedLocations = userData.location;
+    if (!savedLocations || typeof savedLocations !== "object" || Array.isArray(savedLocations)) {
+        return null;
+    }
+
+    const locationEntry = (savedLocations as Record<string, unknown>)[locationName];
+    if (!locationEntry || typeof locationEntry !== "object" || Array.isArray(locationEntry)) {
+        return null;
+    }
+
+    const locationData = locationEntry as Record<string, unknown>;
+    const latitude = readNumericField(locationData, ["latitude"]);
+    const longitude = readNumericField(locationData, ["longitude"]);
+
+    if (latitude === null || longitude === null) {
+        return null;
+    }
+
+    return {latitude, longitude};
+}
+
+async function enqueueClockHandScreenChange(
+    userId: string,
+    userData: Record<string, unknown>,
+    screenNumber: number,
+    locationName: string | null
+): Promise<void> {
+    const handNumber = readNumericField(userData, ["handNumber"]);
+    if (handNumber === null) {
+        logger.warn(`User ${userId} has no assigned hand. Skipping move_clock_hand event.`);
+        return;
+    }
+
+    await enqueueEsp32Event({
+        eventType: "move_clock_hand",
+        userId,
+        handNumber,
+        payload: {
+            handNumber,
+            screenNumber,
+            locationName,
+        },
+        sourceCollection: "users",
+        sourceId: userId,
+    });
+}
+
 function normalizeScreenNumber(value: unknown): number | null {
     if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 3) {
         return value;
@@ -569,20 +644,46 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
 
     const beforeData = change.before.data();
     const afterData = change.after.data();
+    const afterDataMap = (afterData ?? {}) as Record<string, unknown>;
+    const userId = event.params.userId;
 
     const beforeLocation = beforeData?.currentLocation;
     const afterLocation = afterData?.currentLocation;
 
-    // Optimization & Cost-Savings: If the textual location hasn't changed, exit immediately
-    if (beforeLocation === afterLocation) {
-        logger.log(`Location did not change for user ${event.params.userId}. Skipping execution.`);
+    if (isLocationUnset(beforeLocation) && isLocationUnset(afterLocation)) {
+        logger.log(`Location remains empty for user ${userId}. Skipping execution.`);
         return;
     }
 
-    logger.log(`User ${event.params.userId} changed location from '${beforeLocation}' to '${afterLocation}'`);
+    // Optimization & Cost-Savings: If the textual location hasn't changed, exit immediately
+    if (beforeLocation === afterLocation) {
+        logger.log(`Location did not change for user ${userId}. Skipping execution.`);
+        return;
+    }
+
+    logger.log(`User ${userId} changed location from '${beforeLocation}' to '${afterLocation}'`);
+
+    if (isLocationUnset(afterLocation)) {
+        logger.log(`Location cleared for user ${userId}. Moving clock hand to screen -1.`);
+
+        const normalizationUpdates: Record<string, unknown> = {};
+        if (afterDataMap.currentLocation !== null) {
+            normalizationUpdates.currentLocation = null;
+        }
+        if (afterDataMap.targetScreenNumber !== -1) {
+            normalizationUpdates.targetScreenNumber = -1;
+        }
+
+        if (Object.keys(normalizationUpdates).length > 0) {
+            await change.after.ref.set(normalizationUpdates, {merge: true});
+        }
+
+        await enqueueClockHandScreenChange(userId, afterDataMap, -1, null);
+        return;
+    }
 
     // If the new location is empty, missing, or already "Unknown Location", handle gracefully and exit
-    if (!afterLocation || afterLocation === "Unknown Location") {
+    if (afterLocation === "Unknown Location" || afterLocation === "Unknown") {
         logger.log("Location is empty or Unknown. Setting targetScreenNumber to default (0).");
         await change.after.ref.set({ targetScreenNumber: 0, currentLocation: "Unknown Location" }, { merge: true });
         return;
@@ -621,8 +722,6 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
 
         logger.log(`Successfully updated user ${event.params.userId} - Location: '${finalLocation}', Screen: ${targetScreenNumber}`);
 
-        const afterDataMap = afterData as Record<string, unknown>;
-        const userId = event.params.userId;
         const handNumber = readNumericField(afterDataMap, ["handNumber"]);
         const fallbackScreen = handNumber !== null ? handNumber : undefined;
 
@@ -661,18 +760,7 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
                 });
             }
 
-            await enqueueEsp32Event({
-                eventType: "move_clock_hand",
-                userId,
-                handNumber: handNumber === null ? undefined : handNumber,
-                payload: {
-                    handNumber,
-                    screenNumber: targetScreenNumber,
-                    locationName: finalLocation,
-                },
-                sourceCollection: "users",
-                sourceId: userId,
-            });
+            await enqueueClockHandScreenChange(userId, afterDataMap, targetScreenNumber, finalLocation);
         }
 
         // --- PART 2: Trigger Queued Messages On Arrival ---
@@ -812,13 +900,13 @@ export const onLocationDeleted = onDocumentDeleted("locations/{locationId}", asy
                 logger.log(`Preparing location reset for user ID: ${doc.id}`);
 
                 batch.update(doc.ref, {
-                    currentLocation: "Unknown Location",
-                    targetScreenNumber: 0,
+                    currentLocation: null,
+                    targetScreenNumber: -1,
                 });
             });
 
             await batch.commit();
-            logger.log(`Successfully updated ${usersSnapshot.size} users following the deletion of '${deletedLocationName}'.`);
+            logger.log(`Successfully cleared location for ${usersSnapshot.size} user(s) following the deletion of '${deletedLocationName}'.`);
         } else {
             logger.log(`No users were found with currentLocation == '${deletedLocationName}'.`);
         }
@@ -1250,38 +1338,42 @@ export const flagStaleLocations = onSchedule(
             let staleCount = 0;
 
             usersSnapshot.forEach((doc) => {
-                const userData = doc.data();
+                const userData = doc.data() as Record<string, unknown>;
                 const userName = userData.fullName || "Unknown User";
-                const currentLocation = userData.currentLocation;
-                const lastUpdatedTimestamp = userData.lastLocationUpdateTime;
+                const currentLocation = readStringField(userData, ["currentLocation"]);
 
                 // If the user is already at an Unknown Location, skip them to save operations
-                if (!currentLocation || currentLocation === "Unknown Location") {
+                if (!currentLocation || currentLocation === "Unknown Location" || currentLocation === "Unknown") {
                     return; 
                 }
 
+                if (readUserLocationGpsCoordinates(userData, currentLocation) !== null) {
+                    return;
+                }
+
+                const lastUpdatedMs = readTimestampMillis(userData, ["lastUpdated", "lastLocationUpdateTime"]);
+
                 // Check if the timestamp exists and calculate the difference
-                if (lastUpdatedTimestamp) {
-                    const lastUpdatedMs = lastUpdatedTimestamp.toDate().getTime();
+                if (lastUpdatedMs !== null) {
                     const timeDifference = nowMs - lastUpdatedMs;
 
                     if (timeDifference > STALE_THRESHOLD_MS) {
-                        logger.log(`User '${userName}' has a stale location (Over 12 hours). Reverting to Unknown Location.`);
+                        logger.log(`User '${userName}' has a stale non-GPS location (over 12 hours). Clearing location.`);
                         
                         // Add the update operation to the batch
                         batch.update(doc.ref, {
-                            currentLocation: "Unknown Location",
-                            targetScreenNumber: 0
+                            currentLocation: null,
+                            targetScreenNumber: -1
                         });
                         staleCount++;
                     }
                 } else {
-                    // Edge Case: If the user has a location but NO timestamp was ever recorded, 
-                    // we flag them as stale for safety.
-                    logger.warn(`User '${userName}' has a set location but no 'lastLocationUpdateTime'. Reverting to Unknown Location.`);
+                    // Edge Case: If the user has a non-GPS location but no timestamp was ever recorded,
+                    // clear it for safety.
+                    logger.warn(`User '${userName}' has a non-GPS location but no timestamp. Clearing location.`);
                     batch.update(doc.ref, {
-                        currentLocation: "Unknown Location",
-                        targetScreenNumber: 0
+                        currentLocation: null,
+                        targetScreenNumber: -1
                     });
                     staleCount++;
                 }
@@ -1290,7 +1382,7 @@ export const flagStaleLocations = onSchedule(
             // Commit the batch to the database if we found any stale users
             if (staleCount > 0) {
                 await batch.commit();
-                logger.log(`Successfully reset ${staleCount} stale user(s) to Unknown Location.`);
+                logger.log(`Successfully cleared ${staleCount} stale non-GPS user location(s).`);
             } else {
                 logger.log("All user locations are up to date. No stale locations found.");
             }
