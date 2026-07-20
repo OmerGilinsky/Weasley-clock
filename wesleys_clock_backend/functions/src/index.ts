@@ -774,74 +774,7 @@ export const onUserDeleted = onDocumentDeleted("users/{userId}", async (event) =
     }
 });
 
-/**
- * Trigger: onLocationDeleted
- * Triggers automatically when an admin deletes a location document from the "locations" collection.
- * Purpose: Cleanup/Maintenance - Updates users who are currently at the deleted location.
- */
-// export const onLocationDeleted = onDocumentDeleted("locations/{locationId}", async (event) => {
-//     const snapshot = event.data;
-//     if (!snapshot) {
-//         logger.error("No data associated with the event");
-//         return;
-//     }
 
-//     // Extract the internal location name (e.g., "WORK") from the deleted document data
-//     const deletedLocationData = snapshot.data() as Record<string, unknown>;
-//     const deletedLocationName = deletedLocationData?.locationName; 
-//     const deletedLocationScreen = readLocationScreenNumber(deletedLocationData);
-
-//     if (!deletedLocationName) {
-//         logger.warn(`The deleted document '${event.params.locationId}' did not contain a 'locationName' field. Cleanup aborted.`);
-//         return;
-//     }
-
-//     logger.log(`Location '${deletedLocationName}' (ID: ${event.params.locationId}) was deleted. Starting cleanup process for affected users...`);
-
-//     try {
-//         // 1. Query all users whose currentLocation matches the internal location name (e.g., "WORK")
-//         const usersSnapshot = await db.collection("users")
-//             .where("currentLocation", "==", deletedLocationName)
-//             .get();
-
-//         // 2. Update all affected users, if any
-//         if (!usersSnapshot.empty) {
-//             const batch = db.batch();
-
-//             usersSnapshot.docs.forEach((doc) => {
-//                 logger.log(`Preparing location reset for user ID: ${doc.id}`);
-
-//                 batch.update(doc.ref, {
-//                     currentLocation: "Unknown Location",
-//                     targetScreenNumber: 0,
-//                 });
-//             });
-
-//             await batch.commit();
-//             logger.log(`Successfully updated ${usersSnapshot.size} users following the deletion of '${deletedLocationName}'.`);
-//         } else {
-//             logger.log(`No users were found with currentLocation == '${deletedLocationName}'.`);
-//         }
-
-//         // 3. Always queue display clear for the deleted location screen
-//         if (deletedLocationScreen !== null) {
-//             await enqueueEsp32Event({
-//                 eventType: "update_display",
-//                 payload: {
-//                     screenNumber: deletedLocationScreen,
-//                     picture: null,
-//                 },
-//                 sourceCollection: "locations",
-//                 sourceId: event.params.locationId,
-//             });
-//         } else {
-//             logger.warn(`Deleted location '${event.params.locationId}' has no valid screenNumber. Skipping display clear queue event.`);
-//         }
-
-//     } catch (error) {
-//         logger.error("Error occurred during onLocationDeleted execution:", error);
-//     }
-// });
 
 /**
  * Trigger: onLocationDeleted
