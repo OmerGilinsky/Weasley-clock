@@ -17,10 +17,11 @@ import { onCall, HttpsError } from "firebase-functions/v2/https";
 import { onRequest } from "firebase-functions/v2/https";
 import ffmpegPath from "ffmpeg-static";
 
+const DATABASE_URL = "https://wesleys-clock-default-rtdb.firebaseio.com";
 
 // Get the Firestore instance to share between functions
 if (getApps().length === 0) {
-    initializeApp();
+    initializeApp({databaseURL: DATABASE_URL});
 }
 const db = getFirestore();
 const rtdb = getDatabase();
