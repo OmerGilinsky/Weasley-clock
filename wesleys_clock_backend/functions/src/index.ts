@@ -1278,8 +1278,8 @@ export const checkAndPromptMissingUpdates = onSchedule(
  */
 export const flagStaleLocations = onSchedule(
     {
-        schedule: "0 * * * *", // Cron syntax: Runs every hour exactly at the top of the hour
-        timeZone: "Asia/Jerusalem" // Configured for Israel timezone
+        schedule: "0 * * * *",
+        timeZone: "Asia/Jerusalem"
     },
     async (event) => {
         logger.log("Starting hourly check for stale locations...");
@@ -1292,26 +1292,22 @@ export const flagStaleLocations = onSchedule(
                 return;
             }
 
-            // Define the threshold for a "stale" update (12 hours in milliseconds)
             const STALE_THRESHOLD_MS = 12 * 60 * 60 * 1000;
             const nowMs = Date.now();
-            
-            // Use a batch write to efficiently update multiple users at once.
-            const batch = db.batch();
             let staleCount = 0;
 
             for (const doc of usersSnapshot.docs) {
                 const userData = doc.data();
+                const userId = doc.id; // --- NEW: Captured userId for operations ---
                 const userName = userData.fullName || "Unknown User";
                 const currentLocation = typeof userData.currentLocation === "string" ? userData.currentLocation : null;
                 const lastUpdatedTimestamp = userData.lastLocationUpdateTime ?? userData.lastUpdated;
+                const handNumber = readNumericField(userData, ["handNumber"]); // --- NEW: Captured handNumber for ESP32 ---
 
-                // If the user is already at no location, skip them to save operations.
                 if (!currentLocation) {
                     continue;
                 }
 
-                // Rule #2: Only apply the 12-hour stale reset when the location has no GPS coordinates.
                 const locationSnapshot = await db.collection("locations")
                     .where("locationName", "==", currentLocation)
                     .limit(1)
@@ -1329,35 +1325,40 @@ export const flagStaleLocations = onSchedule(
                     continue;
                 }
 
-                // Check if the timestamp exists and calculate the difference.
-                if (lastUpdatedTimestamp) {
-                    const lastUpdatedMs = lastUpdatedTimestamp.toDate().getTime();
-                    const timeDifference = nowMs - lastUpdatedMs;
+                const isStale = lastUpdatedTimestamp 
+                    ? (nowMs - lastUpdatedTimestamp.toDate().getTime() > STALE_THRESHOLD_MS)
+                    : true;
 
-                    if (timeDifference > STALE_THRESHOLD_MS) {
-                        logger.log(`User '${userName}' has a stale non-GPS location (Over 12 hours). Reverting to null.`);
+                if (isStale) {
+                    logger.log(`User '${userName}' has a stale non-GPS location. Resetting.`);
 
-                        batch.update(doc.ref, {
-                            currentLocation: null,
-                            targetScreenNumber: -1,
-                        });
-                        staleCount++;
-                    }
-                } else {
-                    // If the location has no GPS and no update timestamp, clear it for safety.
-                    logger.warn(`User '${userName}' has a non-GPS location but no update timestamp. Reverting to null.`);
-                    batch.update(doc.ref, {
+                    
+                    // 1. Update Firestore to clear location and target screen
+                    await doc.ref.update({
                         currentLocation: null,
                         targetScreenNumber: -1,
                     });
+
+                    // 2. Queue movement to off-screen (-1) via ESP32 event
+                    await enqueueEsp32Event({
+                        eventType: "move_clock_hand",
+                        userId: userId,
+                        handNumber: handNumber !== null ? handNumber : undefined,
+                        payload: {
+                            handNumber: handNumber,
+                            screenNumber: -1, // Move to off-screen
+                            locationName: null,
+                        },
+                        sourceCollection: "users",
+                        sourceId: userId,
+                    });
+
                     staleCount++;
                 }
             }
 
-            // Commit the batch to the database if we found any stale users
             if (staleCount > 0) {
-                await batch.commit();
-                logger.log(`Successfully reset ${staleCount} stale user(s) to null location.`);
+                logger.log(`Successfully reset ${staleCount} stale user(s) to null location and moved hands.`);
             } else {
                 logger.log("All user locations are up to date. No stale locations found.");
             }
