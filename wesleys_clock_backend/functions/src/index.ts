@@ -1628,11 +1628,12 @@ export const sendDirectLocationPrompt = onCall(async (request) => {
         // --- 5. Send the Push Notification via FCM ---
         const message = {
             notification: {
-                title: "איפה את/ה? 📍",
-                body: `${senderName} מחכה שתעדכן/י מיקום בשעון המשפחתי!`
+                title: "Where are you? ",
+                body: `${senderName} is waiting for you to update your location on the family clock!`
             },
             token: fcmToken
         };
+        
 
         await getMessaging().send(message);
         logger.log(`Prompt sent successfully from '${senderName}' to user ID: '${targetUserId}'`);
