@@ -287,8 +287,8 @@ const getStoragePath = (url: string) => {
     if (!url.startsWith("http")) return url;
     try {
         if (url.includes("/o/")) {
-            let path = decodeURIComponent(url.split("/o/")[1].split("?")[0]);
-            return path.startsWith("/") ? path : `/${path}`;
+            const path = decodeURIComponent(url.split("/o/")[1].split("?")[0]);
+            return path.replace(/^\/+/, "");
         }
     } catch (e) {
         console.error("Path extraction failed", e);
@@ -308,7 +308,7 @@ async function sanitizeEsp32Payload(eventType: Esp32QueueEventType, payload: Rec
 
         const imageHash = createHash("sha1").update(source).digest("hex").substring(0, 16);
         const destination = `${folder}/${imageHash}.jpg`;
-        const finalPath = `/${destination}`;
+        const finalPath = destination;
         const outputFile = bucket.file(destination);
 
         const [alreadyExists] = await outputFile.exists();
