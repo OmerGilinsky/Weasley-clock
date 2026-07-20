@@ -11,6 +11,7 @@ import 'package:record/record.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:permission_handler/permission_handler.dart' as permission_handler;
 import 'dart:typed_data';
 import 'dart:async';
 import '../firebase_options.dart';
@@ -29,7 +30,7 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
   final ImagePicker _imagePicker = ImagePicker();
   static const int _maxManagedUsers = 4;
   static const int _maxLocations = 4;
-  static const double _arrivalRadiusMeters = 10;
+  static const double _arrivalRadiusMeters = 50;
   static const double _exitRadiusMeters = 100;
   Timer? _proximityTimer;
   bool _isCheckingProximity = false;
@@ -47,18 +48,8 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
   }
 
   Future<void> _ensureLocationPermissionAndStartChecks() async {
-    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) {
-      return;
-    }
-
-    var permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-    }
-
-    if (permission == LocationPermission.denied ||
-        permission == LocationPermission.deniedForever) {
+    final hasPermission = await _ensureLocationPermission(showFeedback: false);
+    if (!hasPermission) {
       return;
     }
 
@@ -68,6 +59,161 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
       const Duration(seconds: 20),
       (_) => _checkAndUpdateNearbyLocation(),
     );
+  }
+
+  Future<bool> _openAppSettingsWithFallback() async {
+    if (kIsWeb) {
+      return false;
+    }
+
+    final openedByPermissionHandler =
+        await permission_handler.openAppSettings();
+    if (openedByPermissionHandler) {
+      return true;
+    }
+    return Geolocator.openAppSettings();
+  }
+
+  Future<void> _showSettingsOpenFailedMessage() async {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Could not open settings automatically. Please open app settings manually.',
+        ),
+      ),
+    );
+  }
+
+  Future<bool> _ensureLocationPermission({bool showFeedback = true}) async {
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      if (showFeedback && mounted) {
+        final shouldOpenLocationSettings = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Location services are off'),
+            content: const Text(
+              'Please enable device location services to use GPS features.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Not now'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Open Location Settings'),
+              ),
+            ],
+          ),
+        );
+
+        if (shouldOpenLocationSettings == true) {
+          final opened = await Geolocator.openLocationSettings();
+          if (!opened) {
+            await _showSettingsOpenFailedMessage();
+          }
+        }
+      }
+      return false;
+    }
+
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+
+    if (permission == LocationPermission.denied) {
+      if (showFeedback && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Location permission is required.')),
+        );
+      }
+      return false;
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      if (showFeedback && mounted) {
+        final shouldOpenSettings = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Location permission needed'),
+            content: const Text(
+              'Location permission is permanently denied. Open app settings to enable it?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Not now'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Open Settings'),
+              ),
+            ],
+          ),
+        );
+
+        if (shouldOpenSettings == true) {
+          final opened = await _openAppSettingsWithFallback();
+          if (!opened) {
+            await _showSettingsOpenFailedMessage();
+          }
+        }
+      }
+      return false;
+    }
+
+    return true;
+  }
+
+  Future<bool> _ensureMicrophonePermission() async {
+    if (kIsWeb) {
+      return true;
+    }
+
+    var status = await permission_handler.Permission.microphone.status;
+    if (!status.isGranted) {
+      status = await permission_handler.Permission.microphone.request();
+    }
+
+    if (status.isGranted) {
+      return true;
+    }
+
+    if (mounted) {
+      final shouldOpenSettings = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Microphone permission needed'),
+          content: const Text(
+            'Recording requires microphone permission. Open app settings to enable it?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Not now'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Open Settings'),
+            ),
+          ],
+        ),
+      );
+
+      if (shouldOpenSettings == true) {
+        final opened = await _openAppSettingsWithFallback();
+        if (!opened) {
+          await _showSettingsOpenFailedMessage();
+        }
+      }
+    }
+
+    return false;
   }
 
   Future<void> _checkAndUpdateNearbyLocation() async {
@@ -158,8 +304,8 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
           'lastUpdated': FieldValue.serverTimestamp(),
         }, SetOptions(merge: true));
       }
-    } catch (_) {
-      // Ignore transient location/Firebase failures; periodic checks continue.
+    } catch (error) {
+      debugPrint('Proximity check failed: $error');
     } finally {
       _isCheckingProximity = false;
     }
@@ -341,7 +487,8 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
     final timestamp = DateTime.now().millisecondsSinceEpoch;
 
     try {
-      if (!await recorder.hasPermission()) {
+      final micGranted = await _ensureMicrophonePermission();
+      if (!micGranted || !await recorder.hasPermission()) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Microphone permission is required.')),
@@ -406,6 +553,13 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
         name: 'voice_message_$timestamp.${kIsWeb ? 'webm' : 'm4a'}',
         bytes: bytes,
       );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Recording failed: $error')),
+        );
+      }
+      return null;
     } finally {
       await recorder.dispose();
     }
@@ -710,9 +864,10 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
     );
   }
 
-  Future<_GpsCoordinate?> _showGpsPointPicker() async {
+  Future<_GpsCoordinate?> _showGpsPointPicker({
+    required LatLng initialPoint,
+  }) async {
     LatLng? selectedPoint;
-    const initialPoint = LatLng(31.7683, 35.2137);
 
     final result = await showDialog<_GpsCoordinate>(
       context: context,
@@ -966,9 +1121,10 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
       return const SizedBox.shrink();
     }
 
-    return Expanded(
-      child: Card(
-        margin: const EdgeInsets.only(top: 20),
+    return Card(
+      margin: const EdgeInsets.only(top: 20),
+      child: SizedBox(
+        height: 280,
         child: Padding(
           padding: const EdgeInsets.all(12.0),
           child: Column(
@@ -1259,6 +1415,11 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
     }
 
     try {
+      final hasLocationPermission = await _ensureLocationPermission();
+      if (!hasLocationPermission) {
+        return;
+      }
+
       final locations = await _fetchLocationNames();
       if (!mounted) {
         return;
@@ -1276,7 +1437,17 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
         return;
       }
 
-      final selectedPoint = await _showGpsPointPicker();
+      LatLng initialPoint = const LatLng(31.7683, 35.2137);
+      try {
+        final position = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.best,
+          ),
+        );
+        initialPoint = LatLng(position.latitude, position.longitude);
+      } catch (_) {}
+
+      final selectedPoint = await _showGpsPointPicker(initialPoint: initialPoint);
       if (!mounted || selectedPoint == null) {
         return;
       }
@@ -2013,11 +2184,15 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
           ),
         ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) => SingleChildScrollView(
+            padding: const EdgeInsets.all(24.0),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minHeight: constraints.maxHeight),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
             Text(
               'Welcome, Admin (${widget.userEmail})',
               style: Theme.of(context).textTheme.titleLarge,
@@ -2110,7 +2285,10 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
               ),
             ),
             _buildPromptInbox(),
-          ],
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );
