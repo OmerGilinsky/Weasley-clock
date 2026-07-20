@@ -90,10 +90,6 @@ async function ensureMp3AudioUrl(audioUrl: string): Promise<string | null> {
         return null;
     }
 
-    if (isMp3Url(sourceUrl)) {
-        return sourceUrl;
-    }
-
     const ffmpegBinary = typeof ffmpegPath === "string" ? ffmpegPath : null;
     if (!ffmpegBinary) {
         logger.error("ffmpeg-static binary is unavailable. Cannot convert audio to mp3.");
@@ -134,9 +130,10 @@ async function ensureMp3AudioUrl(audioUrl: string): Promise<string | null> {
             "-i", inputPath,
             "-vn",
             "-acodec", "libmp3lame",
-            "-ar", "44100",
+            "-ar", "12000",
             "-ac", "1",
-            "-b:a", "128k",
+            "-b:a", "8k",
+            "-af", "lowpass=f=2800,highpass=f=220",
             outputPath,
         ]);
 
@@ -347,8 +344,8 @@ async function sanitizeEsp32Payload(eventType: Esp32QueueEventType, payload: Rec
                 "-y",
                 "-i", inputPath,
                 "-frames:v", "1",
-                "-vf", "scale=280:240:force_original_aspect_ratio=decrease,pad=280:240:(ow-iw)/2:(oh-ih)/2",
-                "-q:v", "3",
+                "-vf", "scale=70:60:force_original_aspect_ratio=decrease,pad=70:60:(ow-iw)/2:(oh-ih)/2,scale=280:240:flags=neighbor,format=yuvj420p,hue=s=0",
+                "-q:v", "31",
                 outputPath,
             ]);
 
@@ -405,13 +402,13 @@ async function sanitizeEsp32Payload(eventType: Esp32QueueEventType, payload: Rec
         const storagePathAudio = getStoragePath(audioUrl);
         let finalAudioPath: string | null = null;
 
-        if (isMp3Url(audioUrl) || isMp3Url(storagePathAudio)) {
-            finalAudioPath = storagePathAudio;
-        } else if (audioUrl.startsWith("http")) {
+        if (audioUrl.startsWith("http")) {
             const convertedUrl = await ensureMp3AudioUrl(audioUrl);
             if (convertedUrl) {
                 finalAudioPath = getStoragePath(convertedUrl);
             }
+        } else if (isMp3Url(storagePathAudio)) {
+            finalAudioPath = storagePathAudio;
         }
 
         if (!finalAudioPath) {
