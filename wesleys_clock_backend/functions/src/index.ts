@@ -1734,26 +1734,6 @@ export const popNextEsp32Event = onRequest(async (request, response) => {
 
     try {
         const claimResult = await db.runTransaction(async (transaction) => {
-            const stateSnapshot = await transaction.get(ESP32_QUEUE_STATE_DOC);
-            const stateData = stateSnapshot.data() as Record<string, unknown> | undefined;
-            const inFlightEventDocId = typeof stateData?.inFlightEventDocId === "string" ? stateData.inFlightEventDocId : null;
-            const inFlightSequence = typeof stateData?.inFlightSequence === "number" ? stateData.inFlightSequence : null;
-            const deviceAvailable = stateData?.deviceAvailable !== false;
-
-            if (inFlightEventDocId) {
-                return {
-                    status: "busy" as const,
-                    inFlightSequence,
-                };
-            }
-
-            if (!deviceAvailable) {
-                return {
-                    status: "unavailable" as const,
-                    inFlightSequence: stateData?.lastAckSequence ?? null,
-                };
-            }
-
             const query = db.collection(ESP32_QUEUE_COLLECTION)
                 .where("status", "==", "pending")
                 .limit(50);
@@ -1798,9 +1778,6 @@ export const popNextEsp32Event = onRequest(async (request, response) => {
             });
 
             transaction.set(ESP32_QUEUE_STATE_DOC, {
-                inFlightEventDocId: eventDoc.doc.id,
-                inFlightSequence: sequence,
-                deviceAvailable: false,
                 lastDispatchAt: FieldValue.serverTimestamp(),
                 updatedAt: FieldValue.serverTimestamp(),
             }, {merge: true});
@@ -1815,15 +1792,6 @@ export const popNextEsp32Event = onRequest(async (request, response) => {
 
         if (claimResult.status === "empty") {
             response.status(200).json({status: "empty"});
-            return;
-        }
-
-        if (claimResult.status === "busy" || claimResult.status === "unavailable") {
-            response.status(200).json({
-                status: "wait",
-                reason: claimResult.status,
-                inFlightSequence: claimResult.inFlightSequence ?? null,
-            });
             return;
         }
 
@@ -1869,30 +1837,18 @@ export const completeEsp32Event = onRequest(async (request, response) => {
         }
 
         const completionResult = await db.runTransaction(async (transaction) => {
-            const stateSnapshot = await transaction.get(ESP32_QUEUE_STATE_DOC);
-            const stateData = stateSnapshot.data() as Record<string, unknown> | undefined;
-            const inFlightEventDocId = typeof stateData?.inFlightEventDocId === "string" ? stateData.inFlightEventDocId : null;
-            const inFlightSequence = typeof stateData?.inFlightSequence === "number" ? stateData.inFlightSequence : null;
-
             let eventDocIdToComplete: string | null = null;
             let sequenceToAck: number | null = null;
 
             if (typeof sequenceId === "number" && Number.isFinite(sequenceId)) {
                 sequenceToAck = sequenceId;
-                if (inFlightSequence !== null && inFlightSequence !== sequenceId) {
-                    return {status: "mismatch" as const};
-                }
 
-                if (inFlightEventDocId) {
-                    eventDocIdToComplete = inFlightEventDocId;
-                } else {
-                    const query = db.collection(ESP32_QUEUE_COLLECTION)
-                        .where("sequence", "==", sequenceId)
-                        .limit(1);
-                    const result = await transaction.get(query);
-                    if (!result.empty) {
-                        eventDocIdToComplete = result.docs[0].id;
-                    }
+                const query = db.collection(ESP32_QUEUE_COLLECTION)
+                    .where("sequence", "==", sequenceId)
+                    .limit(1);
+                const result = await transaction.get(query);
+                if (!result.empty) {
+                    eventDocIdToComplete = result.docs[0].id;
                 }
             } else if (eventId) {
                 eventDocIdToComplete = eventId;
@@ -1934,11 +1890,6 @@ export const completeEsp32Event = onRequest(async (request, response) => {
 
         if (completionResult.status === "not_found") {
             response.status(404).json({error: "Event not found."});
-            return;
-        }
-
-        if (completionResult.status === "mismatch") {
-            response.status(409).json({error: "ACK sequence mismatch with in-flight event."});
             return;
         }
 
