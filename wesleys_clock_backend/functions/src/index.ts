@@ -389,7 +389,7 @@ export const onUserCreated = onDocumentCreated("users/{userId}",
       finalName = "Unknown User";
     }
 
-    // --- Dynamic location validation against Admin GPS settings ---
+    //  Dynamic location validation against Admin GPS settings 
     let finalLocation = userData && userData.currentLocation ? userData.currentLocation : null;
     const allowedLocationNames: string[] = [];
 
@@ -445,27 +445,22 @@ export const onUserCreated = onDocumentCreated("users/{userId}",
 
         // Handle edge cases and allocate using set and merge (including protected name and location)
         if (assignedHand === null) {
-          logger.log(`No hand for ${finalName} (${userId}). Waiting list.`);
-          transaction.set(snapshot.ref, {
+                throw new Error(`No free physical hand available for user ${userId}. Aborting creation.`);
+            }
+
+            transaction.set(snapshot.ref, {
             fullName: finalName, 
-            currentLocation: finalLocation, // Updates to the safe/corrected location
-                        handNumber: null,
-            status: "waiting_list",
-          }, { merge: true });
-        } else {
-          logger.log(`Assigning hand ${assignedHand} to ${finalName}`);
-          transaction.set(snapshot.ref, {
-            fullName: finalName, 
-            currentLocation: finalLocation, // Updates to the safe/corrected location
+            currentLocation: finalLocation,
             handNumber: assignedHand,
             status: "active",
-          }, { merge: true });
-        }
-      });
+            }, { merge: true });
+        });
 
       logger.log(`Transaction completed successfully for user ${userId}`);
     } catch (error) {
       logger.error("Transaction failed critically: ", error);
+      // Optional: If you want to delete the invalid doc that was just created:
+      await snapshot.ref.delete();
     }
   }
 );
@@ -516,9 +511,7 @@ export const onLocationCreated = onDocumentCreated("locations/{locationId}",
                 }
 
                 if (assignedScreenNumber === null) {
-                    logger.warn(`No free screen slot for location ${locationId}. Setting screenNumber to null.`);
-                } else {
-                    logger.log(`Assigning screenNumber ${assignedScreenNumber} to location ${locationId}`);
+                    throw new Error(`No free screen slot available for location ${locationId}. Aborting creation.`);
                 }
 
                 const updates: Record<string, unknown> = {
@@ -548,6 +541,7 @@ export const onLocationCreated = onDocumentCreated("locations/{locationId}",
             }
         } catch (error) {
             logger.error("Failed to auto-assign location screen number:", error);
+            await snapshot.ref.delete();
         }
     }
 );
@@ -609,7 +603,7 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
     }
 
     try {
-        // --- PART 1: Validate Location and Update targetScreenNumber ---
+        //  PART 1: Validate Location and Update targetScreenNumber 
         const locationsRef = db.collection("locations");
         const snapshot = await locationsRef.where("locationName", "==", afterLocation).limit(1).get();
 
@@ -709,41 +703,6 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
             });
         }
 
-        // --- PART 2: Trigger Queued Messages On Arrival ---
-        // Only trigger if they successfully arrived HOME
-        if (finalLocation === "HOME") {
-            const userName = afterData?.fullName;
-            logger.log(`User '${userName}' arrived HOME. Checking for queued messages...`);
-
-            const queuedMessagesSnapshot = await db.collection("voice_messages")
-                .where("status", "==", "queued")
-                .get();
-
-            if (!queuedMessagesSnapshot.empty) {
-                const batch = db.batch();
-                let messagesUpdatedCount = 0;
-
-                queuedMessagesSnapshot.docs.forEach((msgDoc) => {
-                    const msgData = msgDoc.data();
-                    const targetName = msgData.targetUserName || msgData.recipientName;
-
-                    if (!targetName || targetName === userName) {
-                        logger.log(`Queue match found! Preparing to play message ${msgDoc.id} for ${userName || 'the family'}.`);
-                        batch.update(msgDoc.ref, { status: "ready_to_play" });
-                        messagesUpdatedCount++;
-                    }
-                });
-
-                if (messagesUpdatedCount > 0) {
-                    await batch.commit();
-                    logger.log(`Successfully triggered ${messagesUpdatedCount} queued messages for playback.`);
-                } else {
-                    logger.log("Queued messages exist, but none are for the user who just arrived.");
-                }
-            } else {
-                logger.log("No queued messages found in the database. The house is clear.");
-            }
-        }
 
     } catch (error) {
         logger.error("Error executing onUserLocationChanged:", error);
@@ -768,7 +727,7 @@ export const onUserDeleted = onDocumentDeleted("users/{userId}", async (event) =
     logger.log(`Starting cleanup chain for deleted user ${userId} who held clock hand #${deletedHand}`);
 
     try {
-        // --- 1. Firestore Cascade Delete: voice_messages ---
+        //  1. Firestore Cascade Delete: voice_messages 
         const voiceMessagesRef = db.collection("voice_messages");
         // Assuming messages are linked to the user via a "userId" or "senderId" field
         const voiceSnapshot = await voiceMessagesRef.where("userId", "==", userId).get();
@@ -780,7 +739,7 @@ export const onUserDeleted = onDocumentDeleted("users/{userId}", async (event) =
             logger.log(`Successfully deleted ${voiceSnapshot.size} voice message documents from Firestore.`);
         }
 
-        // --- 2. Firestore Cascade Delete: visual_greetings (Doodles/Drawings) ---
+        //  2. Firestore Cascade Delete: visual_greetings (Doodles/Drawings) 
         const visualGreetingsRef = db.collection("visual_greetings");
         const visualSnapshot = await visualGreetingsRef.where("userId", "==", userId).get();
         
@@ -791,7 +750,7 @@ export const onUserDeleted = onDocumentDeleted("users/{userId}", async (event) =
             logger.log(`Successfully deleted ${visualSnapshot.size} visual greeting documents from Firestore.`);
         }
 
-        // --- 3. Cloud Storage Cleanup: Storage Orphan Prevention ---
+        //  3. Cloud Storage Cleanup: Storage Orphan Prevention 
         const bucket = getStorage().bucket();
         const userAudioFolder = `audio_bites/${userId}/`;
 
@@ -973,90 +932,33 @@ export const onLocationUpdated = onDocumentUpdated("locations/{locationId}", asy
  */
 export const onVoiceMessageCreated = onDocumentCreated("voice_messages/{messageId}", async (event) => {
     const snapshot = event.data;
-    if (!snapshot) {
-        logger.error("No data associated with the new voice message event");
-        return;
-    }
+    if (!snapshot) return;
 
     const messageData = snapshot.data() as Record<string, unknown>;
     
-    const targetUserName = messageData?.targetUserName || messageData?.recipientName; 
+    const shouldPlayImmediately = true; 
+    const newStatus = "ready_to_play";
     
-    let shouldPlayImmediately = false;
+    await snapshot.ref.update({ status: newStatus });
 
-    try {
-        if (targetUserName) {
-            // --- Scenario A: Targeted Personal Message (By Name) ---
-            logger.log(`Processing personal message for user name: ${targetUserName}`);
-            
-            
-            const usersSnapshot = await db.collection("users")
-                .where("fullName", "==", targetUserName)
-                .limit(1) 
-                .get();
-            
-            if (!usersSnapshot.empty) {
-                const userData = usersSnapshot.docs[0].data();
-                //CHECK IF THE TARGET IS CURRENTLY AT HOME
-                if (userData?.currentLocation === "HOME") {
-                    shouldPlayImmediately = true;
-                    logger.log(`Target user '${targetUserName}' is at HOME. Message ready to play.`);
-                } else {
-                    logger.log(`Target user '${targetUserName}' is NOT at HOME (current location: ${userData?.currentLocation}). Queuing message.`);
-                }
-            } else {
-                logger.warn(`Target user with name '${targetUserName}' not found in database. Queuing message as fallback.`);
-            }
+    const targetUser = await findUserByMessageData(messageData);
+    const handNumber = targetUser ? readNumericField(targetUser.data, ["handNumber"]) : null;
+    const audioUrl = readAudioUrl(messageData);
 
-        } else {
-            // --- Scenario B: General Family Message (No specific recipient) ---
-            logger.log("Processing family message. Checking if anyone is at HOME.");
-            
-            // Check if there is at least one family member currently at "HOME"
-            const usersAtHomeSnapshot = await db.collection("users")
-                .where("currentLocation", "==", "HOME")
-                .limit(1) 
-                .get();
-                
-            if (!usersAtHomeSnapshot.empty) {
-                shouldPlayImmediately = true;
-                logger.log("At least one person is currently at HOME. Message ready to play.");
-            } else {
-                logger.log("The house is currently empty. Queuing message.");
-            }
-        }
-
-        // --- Update Message Status in Firestore ---
-        const newStatus = shouldPlayImmediately ? "ready_to_play" : "queued";
-        
-        await snapshot.ref.update({
-            status: newStatus
+    if (audioUrl) {
+        await enqueueEsp32Event({
+            eventType: "play_voice",
+            userId: targetUser ? targetUser.id : undefined,
+            handNumber: handNumber === null ? undefined : handNumber,
+            payload: {
+                audioUrl,
+                messageId: event.params.messageId,
+                targetUserId: targetUser ? targetUser.id : null,
+                shouldPlayImmediately, 
+            },
+            sourceCollection: "voice_messages",
+            sourceId: event.params.messageId,
         });
-
-        const targetUser = await findUserByMessageData(messageData);
-        const handNumber = targetUser ? readNumericField(targetUser.data, ["handNumber"]) : null;
-        const audioUrl = readAudioUrl(messageData);
-
-        if (audioUrl) {
-            await enqueueEsp32Event({
-                eventType: "play_voice",
-                userId: targetUser ? targetUser.id : undefined,
-                handNumber: handNumber === null ? undefined : handNumber,
-                payload: {
-                    audioUrl,
-                    messageId: event.params.messageId,
-                    targetUserId: targetUser ? targetUser.id : null,
-                    shouldPlayImmediately,
-                },
-                sourceCollection: "voice_messages",
-                sourceId: event.params.messageId,
-            });
-        }
-        
-        logger.log(`Successfully updated voice message ${event.params.messageId} status to '${newStatus}'`);
-
-    } catch (error) {
-        logger.error("Error processing new voice message:", error);
     }
 });
 
@@ -1237,11 +1139,12 @@ export const checkAndPromptMissingUpdates = onSchedule(
                 }
 
                 // If conditions are met AND we have a device token to send the message to
+
                 if (needsAlert && fcmToken) {
                     const message = {
                         notification: {
-                            title: "המשפחה מחכה לדעת איפה את/ה! 🕒",
-                            body: `היי ${userName}, אל תשכח/י לעדכן את המיקום שלך בשעון.`
+                            title: "The family is waiting to know where you are! ",
+                            body: `Hey ${userName}, don't forget to update your location on the clock.`
                         },
                         token: fcmToken
                     };
@@ -1277,8 +1180,8 @@ export const checkAndPromptMissingUpdates = onSchedule(
  */
 export const flagStaleLocations = onSchedule(
     {
-        schedule: "0 * * * *", // Cron syntax: Runs every hour exactly at the top of the hour
-        timeZone: "Asia/Jerusalem" // Configured for Israel timezone
+        schedule: "0 * * * *",
+        timeZone: "Asia/Jerusalem"
     },
     async (event) => {
         logger.log("Starting hourly check for stale locations...");
@@ -1291,26 +1194,22 @@ export const flagStaleLocations = onSchedule(
                 return;
             }
 
-            // Define the threshold for a "stale" update (12 hours in milliseconds)
             const STALE_THRESHOLD_MS = 12 * 60 * 60 * 1000;
             const nowMs = Date.now();
-            
-            // Use a batch write to efficiently update multiple users at once.
-            const batch = db.batch();
             let staleCount = 0;
 
             for (const doc of usersSnapshot.docs) {
                 const userData = doc.data();
+                const userId = doc.id; //  NEW: Captured userId for operations 
                 const userName = userData.fullName || "Unknown User";
                 const currentLocation = typeof userData.currentLocation === "string" ? userData.currentLocation : null;
                 const lastUpdatedTimestamp = userData.lastLocationUpdateTime ?? userData.lastUpdated;
+                const handNumber = readNumericField(userData, ["handNumber"]); //  NEW: Captured handNumber for ESP32 
 
-                // If the user is already at no location, skip them to save operations.
                 if (!currentLocation) {
                     continue;
                 }
 
-                // Rule #2: Only apply the 12-hour stale reset when the location has no GPS coordinates.
                 const locationSnapshot = await db.collection("locations")
                     .where("locationName", "==", currentLocation)
                     .limit(1)
@@ -1328,35 +1227,40 @@ export const flagStaleLocations = onSchedule(
                     continue;
                 }
 
-                // Check if the timestamp exists and calculate the difference.
-                if (lastUpdatedTimestamp) {
-                    const lastUpdatedMs = lastUpdatedTimestamp.toDate().getTime();
-                    const timeDifference = nowMs - lastUpdatedMs;
+                const isStale = lastUpdatedTimestamp 
+                    ? (nowMs - lastUpdatedTimestamp.toDate().getTime() > STALE_THRESHOLD_MS)
+                    : true;
 
-                    if (timeDifference > STALE_THRESHOLD_MS) {
-                        logger.log(`User '${userName}' has a stale non-GPS location (Over 12 hours). Reverting to null.`);
+                if (isStale) {
+                    logger.log(`User '${userName}' has a stale non-GPS location. Resetting.`);
 
-                        batch.update(doc.ref, {
-                            currentLocation: null,
-                            targetScreenNumber: -1,
-                        });
-                        staleCount++;
-                    }
-                } else {
-                    // If the location has no GPS and no update timestamp, clear it for safety.
-                    logger.warn(`User '${userName}' has a non-GPS location but no update timestamp. Reverting to null.`);
-                    batch.update(doc.ref, {
+                    
+                    // 1. Update Firestore to clear location and target screen
+                    await doc.ref.update({
                         currentLocation: null,
                         targetScreenNumber: -1,
                     });
+
+                    // 2. Queue movement to off-screen (-1) via ESP32 event
+                    await enqueueEsp32Event({
+                        eventType: "move_clock_hand",
+                        userId: userId,
+                        handNumber: handNumber !== null ? handNumber : undefined,
+                        payload: {
+                            handNumber: handNumber,
+                            screenNumber: -1, // Move to off-screen
+                            locationName: null,
+                        },
+                        sourceCollection: "users",
+                        sourceId: userId,
+                    });
+
                     staleCount++;
                 }
             }
 
-            // Commit the batch to the database if we found any stale users
             if (staleCount > 0) {
-                await batch.commit();
-                logger.log(`Successfully reset ${staleCount} stale user(s) to null location.`);
+                logger.log(`Successfully reset ${staleCount} stale user(s) to null location and moved hands.`);
             } else {
                 logger.log("All user locations are up to date. No stale locations found.");
             }
@@ -1429,7 +1333,7 @@ export const cleanupExpiredVoiceMessages = onSchedule(
                 }
 
                 if (shouldDelete) {
-                    // --- Step 1: Delete physical audio file from Cloud Storage ---
+                    //  Step 1: Delete physical audio file from Cloud Storage 
                     if (audioUrl) {
                         try {
                             // Parse the Firebase Storage Download URL to extract the exact file path
@@ -1454,7 +1358,7 @@ export const cleanupExpiredVoiceMessages = onSchedule(
                         }
                     }
 
-                    // --- Step 2: Queue the Firestore document for deletion ---
+                    //  Step 2: Queue the Firestore document for deletion 
                     batch.delete(doc.ref);
                     deletedCount++;
                 }
@@ -1493,7 +1397,7 @@ export const clearVisualGreetings = onSchedule(
             let userResetCount = 0;
             let greetingDeleteCount = 0;
 
-            // --- PART 1: Clear LCD screens for all users ---
+            //  PART 1: Clear LCD screens for all users 
             const usersSnapshot = await db.collection("users").get();
             
             if (!usersSnapshot.empty) {
@@ -1507,7 +1411,7 @@ export const clearVisualGreetings = onSchedule(
                 });
             }
 
-            // --- PART 2: Delete expired visual greetings from Firestore and Storage ---
+            //  PART 2: Delete expired visual greetings from Firestore and Storage 
             const greetingsSnapshot = await db.collection("visual_greetings").get();
             const bucket = getStorage().bucket();
 
@@ -1542,7 +1446,7 @@ export const clearVisualGreetings = onSchedule(
                 }
             }
 
-            // --- Commit all updates and deletions together ---
+            //  Commit all updates and deletions together 
             if (userResetCount > 0 || greetingDeleteCount > 0) {
                 await batch.commit();
                 logger.log(`Successfully cleared ${userResetCount} user screens and deleted ${greetingDeleteCount} old doodles.`);
@@ -1562,7 +1466,7 @@ export const clearVisualGreetings = onSchedule(
  * Purpose: Sends a push notification to User B, protected by Auth and a 7-minute cooldown.
  */
 export const sendDirectLocationPrompt = onCall(async (request) => {
-    // --- 1. Security Check: Verify user is authenticated ---
+    //  1. Security Check: Verify user is authenticated 
     // The 'onCall' wrapper automatically verifies the Firebase Auth token.
     if (!request.auth) {
         throw new HttpsError(
@@ -1582,7 +1486,7 @@ export const sendDirectLocationPrompt = onCall(async (request) => {
     }
 
     try {
-        // --- 2. Fetch Sender and Target User Data concurrently ---
+        //  2. Fetch Sender and Target User Data concurrently 
         const targetUserRef = db.collection("users").doc(targetUserId);
         
         const [senderDoc, targetUserDoc] = await Promise.all([
@@ -1597,7 +1501,7 @@ export const sendDirectLocationPrompt = onCall(async (request) => {
         const targetData = targetUserDoc.data();
         const senderName = senderDoc.exists ? senderDoc.data()?.fullName : "A family member";
         
-        // --- 3. Rate Limiting (7-minute cooldown anti-spam) ---
+        //  3. Rate Limiting (7-minute cooldown anti-spam) 
         const lastPromptedTime = targetData?.lastPromptedTime;
         const nowMs = Date.now();
         const COOLDOWN_MS = 7 * 60 * 1000; // 7 minutes in milliseconds
@@ -1615,7 +1519,7 @@ export const sendDirectLocationPrompt = onCall(async (request) => {
             }
         }
 
-        // --- 4. Verify Target has an FCM Token ---
+        //  4. Verify Target has an FCM Token 
         const fcmToken = targetData?.fcmToken;
         if (!fcmToken) {
             throw new HttpsError(
@@ -1624,25 +1528,26 @@ export const sendDirectLocationPrompt = onCall(async (request) => {
             );
         }
 
-        // --- 5. Send the Push Notification via FCM ---
+        //  5. Send the Push Notification via FCM 
         const message = {
             notification: {
-                title: "איפה את/ה? 📍",
-                body: `${senderName} מחכה שתעדכן/י מיקום בשעון המשפחתי!`
+                title: "Where are you? ",
+                body: `${senderName} is waiting for you to update your location on the family clock!`
             },
             token: fcmToken
         };
+        
 
         await getMessaging().send(message);
         logger.log(`Prompt sent successfully from '${senderName}' to user ID: '${targetUserId}'`);
 
-        // --- 6. Update the Cooldown Timestamp ---
+        //  6. Update the Cooldown Timestamp 
         // We use serverTimestamp() to ensure time accuracy across different devices
         await targetUserRef.update({
             lastPromptedTime: FieldValue.serverTimestamp()
         });
 
-        // --- 7. Return Success Response to Flutter ---
+        //  7. Return Success Response to Flutter 
         return {
             status: "success",
             message: "Location prompt sent successfully."
@@ -1667,7 +1572,7 @@ export const sendDirectLocationPrompt = onCall(async (request) => {
  * Returns: A lightweight JSON object optimized for C++ ArduinoJson parsing.
  */
 export const getClockInitConfig = onRequest(async (request, response) => {
-    // --- 1. Restrict to GET requests only ---
+    //  1. Restrict to GET requests only 
     // Hardware should only read data, not modify it via this endpoint.
     if (request.method !== "GET") {
         response.status(405).json({ error: "Method Not Allowed. Please use GET." });
@@ -1677,7 +1582,7 @@ export const getClockInitConfig = onRequest(async (request, response) => {
     try {
         logger.log("ESP32 hardware requested clock initialization config.");
 
-        // --- 2. Fetch all locations from Firestore ---
+        //  2. Fetch all locations from Firestore 
         const locationsSnapshot = await db.collection("locations").get();
         
         // We will build an array of location objects. 
@@ -1700,7 +1605,7 @@ export const getClockInitConfig = onRequest(async (request, response) => {
             }
         });
 
-        // --- 3. Return the JSON payload to the hardware ---
+        //  3. Return the JSON payload to the hardware 
         // Setting a 200 OK status and sending the structured data
         response.status(200).json({
             status: "success",
@@ -1724,7 +1629,7 @@ export const getClockInitConfig = onRequest(async (request, response) => {
  * If the error is critical, it attempts to send a Push Notification to the system Admin.
  */
 export const reportHardwareStatus = onRequest(async (request, response) => {
-    // --- 1. Restrict to POST requests only ---
+    //  1. Restrict to POST requests only 
     // The hardware must send a POST request containing the error data in the body.
     if (request.method !== "POST") {
         response.status(405).json({ error: "Method Not Allowed. Please use POST." });
@@ -1743,7 +1648,7 @@ export const reportHardwareStatus = onRequest(async (request, response) => {
 
         logger.log(`Received hardware report: Code [${errorCode}], Severity [${severity}]`);
 
-        // --- 2. Update the System Status Document in Firestore ---
+        //  2. Update the System Status Document in Firestore 
         // We maintain a single document 'clock_health' inside a 'system_status' collection
         const systemStatusRef = db.collection("system_status").doc("clock_health");
         
@@ -1758,7 +1663,7 @@ export const reportHardwareStatus = onRequest(async (request, response) => {
 
         logger.log("Successfully updated system_status document in Firestore.");
 
-        // --- 3. Alert the Admin if the severity is CRITICAL ---
+        //  3. Alert the Admin if the severity is CRITICAL 
         if (severity === "critical") {
             logger.log("Critical error detected. Attempting to alert the Admin...");
             
@@ -1775,8 +1680,8 @@ export const reportHardwareStatus = onRequest(async (request, response) => {
                 if (fcmToken) {
                     const message = {
                         notification: {
-                            title: "⚠️ התראת חומרה: שעון המשפחה",
-                            body: `זוהתה תקלה קריטית: ${errorMessage || errorCode}. נא לבדוק את השעון.`
+                            title: "⚠️ Hardware Alert: Family Clock",
+                            body: `Critical error detected: ${errorMessage || errorCode}. Please check the clock.`
                         },
                         token: fcmToken
                     };
@@ -1791,7 +1696,7 @@ export const reportHardwareStatus = onRequest(async (request, response) => {
             }
         }
 
-        // --- 4. Acknowledge Receipt to the Hardware ---
+        //  4. Acknowledge Receipt to the Hardware 
         response.status(200).json({
             status: "success",
             message: "Report logged successfully."
