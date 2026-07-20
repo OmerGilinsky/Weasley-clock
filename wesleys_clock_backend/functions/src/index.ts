@@ -1241,12 +1241,14 @@ export const checkAndPromptMissingUpdates = onSchedule(
     }
 );  
 
+
+
 /**
  * Scheduled Function: flagStaleLocations
  * Triggers automatically every hour at minute 0.
  * Purpose: Scans for users who haven't updated their location in over 12 hours.
- * If a location is stale, it automatically reverts the user to "Unknown Location" 
- * and resets their target screen number to 0.
+ * If a location is stale, it reverts the user to "Unknown Location",
+ * updates the target screen number to -1, and queues a command to move the clock hand.
  */
 export const flagStaleLocations = onSchedule(
     {
@@ -1268,52 +1270,59 @@ export const flagStaleLocations = onSchedule(
             const STALE_THRESHOLD_MS = 12 * 60 * 60 * 1000;
             const nowMs = Date.now();
             
-            // Use a batch write to efficiently update multiple users at once
+            // Use a batch write to efficiently update multiple users in Firestore
             const batch = db.batch();
             let staleCount = 0;
 
-            usersSnapshot.forEach((doc) => {
+            // Iterate using for...of to allow asynchronous ESP32 event queuing per user
+            for (const doc of usersSnapshot.docs) {
                 const userData = doc.data();
                 const userName = userData.fullName || "Unknown User";
                 const currentLocation = userData.currentLocation;
                 const lastUpdatedTimestamp = userData.lastLocationUpdateTime;
+                const handNumber = readNumericField(userData, ["handNumber"]);
 
-                // If the user is already at an Unknown Location, skip them to save operations
+                // Skip users already marked as 'Unknown Location' to save operations
                 if (!currentLocation || currentLocation === "Unknown Location") {
-                    return; 
+                    continue; 
                 }
 
-                // Check if the timestamp exists and calculate the difference
-                if (lastUpdatedTimestamp) {
-                    const lastUpdatedMs = lastUpdatedTimestamp.toDate().getTime();
-                    const timeDifference = nowMs - lastUpdatedMs;
+                // Check if the location is stale based on timestamp
+                const lastUpdatedMs = lastUpdatedTimestamp?.toDate()?.getTime() || 0;
+                const timeDifference = nowMs - lastUpdatedMs;
 
-                    if (timeDifference > STALE_THRESHOLD_MS) {
-                        logger.log(`User '${userName}' has a stale location (Over 12 hours). Reverting to Unknown Location.`);
-                        
-                        // Add the update operation to the batch
-                        batch.update(doc.ref, {
-                            currentLocation: "Unknown Location",
-                            targetScreenNumber: 0
-                        });
-                        staleCount++;
-                    }
-                } else {
-                    // Edge Case: If the user has a location but NO timestamp was ever recorded, 
-                    // we flag them as stale for safety.
-                    logger.warn(`User '${userName}' has a set location but no 'lastLocationUpdateTime'. Reverting to Unknown Location.`);
+                if (timeDifference > STALE_THRESHOLD_MS || !lastUpdatedTimestamp) {
+                    logger.log(`User '${userName}' has a stale location. Reverting to Unknown and moving hand to -1.`);
+                    
+                    // 1. Add the update operation to the batch
                     batch.update(doc.ref, {
                         currentLocation: "Unknown Location",
-                        targetScreenNumber: 0
+                        targetScreenNumber: -1
                     });
+
+                    // 2. 🎯 Queue a task to move the physical clock hand to screen -1
+                    if (handNumber !== null) {
+                        await enqueueEsp32Event({
+                            eventType: "move_clock_hand",
+                            userId: doc.id,
+                            handNumber: handNumber,
+                            payload: {
+                                handNumber: handNumber,
+                                screenNumber: -1, // Target screen for stale/unknown status
+                                locationName: "Unknown Location (Stale)"
+                            },
+                            sourceCollection: "users",
+                            sourceId: doc.id
+                        });
+                    }
                     staleCount++;
                 }
-            });
+            }
 
-            // Commit the batch to the database if we found any stale users
+            // Commit the batch to the database if any stale users were found
             if (staleCount > 0) {
                 await batch.commit();
-                logger.log(`Successfully reset ${staleCount} stale user(s) to Unknown Location.`);
+                logger.log(`Successfully reset ${staleCount} stale user(s) and queued hand movements to screen -1.`);
             } else {
                 logger.log("All user locations are up to date. No stale locations found.");
             }
