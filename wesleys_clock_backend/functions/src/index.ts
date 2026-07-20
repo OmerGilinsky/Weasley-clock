@@ -7,7 +7,7 @@ import {execFile} from "node:child_process";
 import {promisify} from "node:util";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import {writeFile, unlink} from "node:fs/promises";
+import {writeFile, unlink, readFile as readFileBuffer} from "node:fs/promises";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { getDatabase } from "firebase-admin/database";
@@ -300,57 +300,130 @@ async function sanitizeEsp32Payload(eventType: Esp32QueueEventType, payload: Rec
     const sanitizedPayload: Record<string, unknown> = { ...payload };
     const bucket = getStorage().bucket("wesleys-clock.firebasestorage.app");
 
-    const processExternalFile = async (url: string, folder: string, defaultExt: string = "jpg") => {
-        const hash = createHash("sha1").update(url).digest("hex").substring(0, 16);
-    
-        const cleanUrl = url.split(/[?#]/)[0];
-        const extMatch = cleanUrl.match(/\.([a-z0-9]+)$/i);
-        const ext = extMatch ? extMatch[1].toLowerCase() : defaultExt; 
-    
-        const destination = `${folder}/${hash}.${ext}`;
-        const file = bucket.file(destination);
-
-        const [exists] = await file.exists();
-        if (!exists) {
-            const response = await fetch(url);
-            if (!response.ok) {
-                throw new Error(`Failed to fetch external file: ${response.statusText}`);
-            }
-            const buffer = Buffer.from(await response.arrayBuffer());
-            
-            const contentType = ext === "mp3" ? "audio/mpeg" : "image/jpeg";
-            await file.save(buffer, { metadata: { contentType } });
+    const ensureJpegImagePath = async (imageSource: string, folder: string): Promise<string | null> => {
+        const source = imageSource.trim();
+        if (!source) {
+            return null;
         }
-        return destination.startsWith("/") ? destination : `/${destination}`; 
+
+        const imageHash = createHash("sha1").update(source).digest("hex").substring(0, 16);
+        const destination = `${folder}/${imageHash}.jpg`;
+        const finalPath = `/${destination}`;
+        const outputFile = bucket.file(destination);
+
+        const [alreadyExists] = await outputFile.exists();
+        if (alreadyExists) {
+            return finalPath;
+        }
+
+        const ffmpegBinary = typeof ffmpegPath === "string" ? ffmpegPath : null;
+        if (!ffmpegBinary) {
+            logger.error("ffmpeg-static binary is unavailable. Cannot convert image to jpeg.");
+            return null;
+        }
+
+        const inputPath = join(tmpdir(), `esp32-image-${imageHash}.input`);
+        const outputPath = join(tmpdir(), `esp32-image-${imageHash}.jpg`);
+
+        try {
+            let sourceBuffer: Buffer;
+            if (source.startsWith("http")) {
+                const response = await fetch(source);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch image source. HTTP ${response.status}`);
+                }
+                sourceBuffer = Buffer.from(await response.arrayBuffer());
+            } else {
+                const sourcePath = getStoragePath(source).replace(/^\/+/, "");
+                if (!sourcePath) {
+                    throw new Error("Storage source path is empty.");
+                }
+                const [downloaded] = await bucket.file(sourcePath).download();
+                sourceBuffer = downloaded;
+            }
+
+            await writeFile(inputPath, sourceBuffer);
+            await execFileAsync(ffmpegBinary, [
+                "-y",
+                "-i", inputPath,
+                "-frames:v", "1",
+                "-vf", "scale=280:240:force_original_aspect_ratio=decrease,pad=280:240:(ow-iw)/2:(oh-ih)/2",
+                "-q:v", "3",
+                outputPath,
+            ]);
+
+            const jpegBuffer = await readFileBuffer(outputPath);
+            await outputFile.save(jpegBuffer, {
+                metadata: {
+                    contentType: "image/jpeg",
+                },
+            });
+
+            return finalPath;
+        } catch (error) {
+            logger.error(`Failed to convert image to jpeg for ESP32 source: ${source}`, error);
+            return null;
+        } finally {
+            await unlink(inputPath).catch(() => undefined);
+            await unlink(outputPath).catch(() => undefined);
+        }
     };
 
     if (eventType === "play_picture" || eventType === "update_display") {
         const pictureUrl = readStringField(payload, ["pictureUrl", "picture"]);
-        if (pictureUrl?.startsWith("http") && !pictureUrl.includes("firebasestorage.googleapis.com")) {
+        if (pictureUrl) {
             let folder = "locations";
             if (payload.sourceCollection === "greetings") {
                 folder = "greetings/visual_messages";
             }
-            sanitizedPayload.pictureUrl = await processExternalFile(pictureUrl, folder, "jpg");
-        } else if (pictureUrl) {
-            sanitizedPayload.pictureUrl = getStoragePath(pictureUrl);
+
+            const jpegPath = await ensureJpegImagePath(pictureUrl, folder);
+            if (!jpegPath) {
+                return {
+                    payload: sanitizedPayload,
+                    dropped: true,
+                    dropReason: `Image conversion to jpeg failed for source: ${pictureUrl}`,
+                };
+            }
+            sanitizedPayload.pictureUrl = jpegPath;
         }
+
         sanitizedPayload.picture = sanitizedPayload.pictureUrl;
         sanitizedPayload.screenSize = { width: 280, height: 240 };
     }
 
     if (eventType === "play_voice") {
         const audioUrl = readStringField(payload, ["audioUrl"]);
-        if (audioUrl?.startsWith("http") && !audioUrl.includes("firebasestorage.googleapis.com")) {
-            let folder = "audio_bites";
-            if (payload.sourceCollection === "greetings") {
-                folder = "greetings/voice_messages";
-            }
-            sanitizedPayload.audioUrl = await processExternalFile(audioUrl, folder, "mp3");
-            sanitizedPayload.audioFormat = "mp3";
-        } else if (audioUrl) {
-            sanitizedPayload.audioUrl = getStoragePath(audioUrl);
+        if (!audioUrl) {
+            return {
+                payload: sanitizedPayload,
+                dropped: true,
+                dropReason: "Missing audioUrl",
+            };
         }
+
+        const storagePathAudio = getStoragePath(audioUrl);
+        let finalAudioPath: string | null = null;
+
+        if (isMp3Url(audioUrl) || isMp3Url(storagePathAudio)) {
+            finalAudioPath = storagePathAudio;
+        } else if (audioUrl.startsWith("http")) {
+            const convertedUrl = await ensureMp3AudioUrl(audioUrl);
+            if (convertedUrl) {
+                finalAudioPath = getStoragePath(convertedUrl);
+            }
+        }
+
+        if (!finalAudioPath) {
+            return {
+                payload: sanitizedPayload,
+                dropped: true,
+                dropReason: `Audio conversion failed for source: ${audioUrl}`,
+            };
+        }
+
+        sanitizedPayload.audioUrl = finalAudioPath;
+        sanitizedPayload.audioFormat = "mp3";
     }
 
     return { payload: sanitizedPayload, dropped: false };
