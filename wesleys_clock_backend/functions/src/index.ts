@@ -862,10 +862,12 @@ export const onUserDeleted = onDocumentDeleted("users/{userId}", async (event) =
     }
 });
 
+
+
 /**
  * Trigger: onLocationDeleted
  * Triggers automatically when an admin deletes a location document from the "locations" collection.
- * Purpose: Cleanup/Maintenance - Updates users who are currently at the deleted location.
+ * Purpose: Cleanup/Maintenance - Updates users who are currently at the deleted location and queues hardware hand movement.
  */
 export const onLocationDeleted = onDocumentDeleted("locations/{locationId}", async (event) => {
     const snapshot = event.data;
@@ -892,21 +894,51 @@ export const onLocationDeleted = onDocumentDeleted("locations/{locationId}", asy
             .where("currentLocation", "==", deletedLocationName)
             .get();
 
-        // 2. Update all affected users, if any
+        // 2. Update all affected users, if any, and queue physical clock hand movement
         if (!usersSnapshot.empty) {
             const batch = db.batch();
 
-            usersSnapshot.docs.forEach((doc) => {
+            for (const doc of usersSnapshot.docs) {
                 logger.log(`Preparing location reset for user ID: ${doc.id}`);
 
+                // Update user document in Firestore
                 batch.update(doc.ref, {
+<<<<<<< HEAD
                     currentLocation: null,
                     targetScreenNumber: -1,
+=======
+                    currentLocation: "Unknown Location",
+                    targetScreenNumber: -1, // Fallback to unknown/default screen
+>>>>>>> 51e0281a187d35503773457d0004bbed60ab7b81
                 });
-            });
+
+                //  Add task to ESP32 queue for each user whose hand needs to move to 0/1 due to location deletion
+
+                const userData = doc.data() as Record<string, unknown>;
+                const handNumber = readNumericField(userData, ["handNumber"]);
+
+                if (handNumber !== null) {
+                    await enqueueEsp32Event({
+                        eventType: "move_clock_hand",
+                        userId: doc.id,
+                        handNumber: handNumber,
+                        payload: {
+                            handNumber: handNumber,
+                            screenNumber: -1, // Target screen configured for Unknown Location
+                            locationName: "Unknown Location",
+                        },
+                        sourceCollection: "locations",
+                        sourceId: event.params.locationId,
+                    });
+                }
+            }
 
             await batch.commit();
+<<<<<<< HEAD
             logger.log(`Successfully cleared location for ${usersSnapshot.size} user(s) following the deletion of '${deletedLocationName}'.`);
+=======
+            logger.log(`Successfully updated ${usersSnapshot.size} users following the deletion of '${deletedLocationName}' and queued hand movements.`);
+>>>>>>> 51e0281a187d35503773457d0004bbed60ab7b81
         } else {
             logger.log(`No users were found with currentLocation == '${deletedLocationName}'.`);
         }
@@ -1304,14 +1336,16 @@ export const checkAndPromptMissingUpdates = onSchedule(
             logger.error("Error executing scheduled location checks:", error);
         }
     }
-);
+);  
+
+
 
 /**
  * Scheduled Function: flagStaleLocations
  * Triggers automatically every hour at minute 0.
  * Purpose: Scans for users who haven't updated their location in over 12 hours.
- * If a location is stale, it automatically reverts the user to "Unknown Location" 
- * and resets their target screen number to 0.
+ * If a location is stale, it reverts the user to "Unknown Location",
+ * updates the target screen number to -1, and queues a command to move the clock hand.
  */
 export const flagStaleLocations = onSchedule(
     {
@@ -1333,10 +1367,11 @@ export const flagStaleLocations = onSchedule(
             const STALE_THRESHOLD_MS = 12 * 60 * 60 * 1000;
             const nowMs = Date.now();
             
-            // Use a batch write to efficiently update multiple users at once
+            // Use a batch write to efficiently update multiple users in Firestore
             const batch = db.batch();
             let staleCount = 0;
 
+<<<<<<< HEAD
             usersSnapshot.forEach((doc) => {
                 const userData = doc.data() as Record<string, unknown>;
                 const userName = userData.fullName || "Unknown User";
@@ -1373,16 +1408,61 @@ export const flagStaleLocations = onSchedule(
                     logger.warn(`User '${userName}' has a non-GPS location but no timestamp. Clearing location.`);
                     batch.update(doc.ref, {
                         currentLocation: null,
+=======
+            // Iterate using for...of to allow asynchronous ESP32 event queuing per user
+            for (const doc of usersSnapshot.docs) {
+                const userData = doc.data();
+                const userName = userData.fullName || "Unknown User";
+                const currentLocation = userData.currentLocation;
+                const lastUpdatedTimestamp = userData.lastLocationUpdateTime;
+                const handNumber = readNumericField(userData, ["handNumber"]);
+
+                // Skip users already marked as 'Unknown Location' to save operations
+                if (!currentLocation || currentLocation === "Unknown Location") {
+                    continue; 
+                }
+
+                // Check if the location is stale based on timestamp
+                const lastUpdatedMs = lastUpdatedTimestamp?.toDate()?.getTime() || 0;
+                const timeDifference = nowMs - lastUpdatedMs;
+
+                if (timeDifference > STALE_THRESHOLD_MS || !lastUpdatedTimestamp) {
+                    logger.log(`User '${userName}' has a stale location. Reverting to Unknown and moving hand to -1.`);
+                    
+                    // 1. Add the update operation to the batch
+                    batch.update(doc.ref, {
+                        currentLocation: "Unknown Location",
+>>>>>>> 51e0281a187d35503773457d0004bbed60ab7b81
                         targetScreenNumber: -1
                     });
+
+                    // 2. 🎯 Queue a task to move the physical clock hand to screen -1
+                    if (handNumber !== null) {
+                        await enqueueEsp32Event({
+                            eventType: "move_clock_hand",
+                            userId: doc.id,
+                            handNumber: handNumber,
+                            payload: {
+                                handNumber: handNumber,
+                                screenNumber: -1, // Target screen for stale/unknown status
+                                locationName: "Unknown Location (Stale)"
+                            },
+                            sourceCollection: "users",
+                            sourceId: doc.id
+                        });
+                    }
                     staleCount++;
                 }
-            });
+            }
 
-            // Commit the batch to the database if we found any stale users
+            // Commit the batch to the database if any stale users were found
             if (staleCount > 0) {
                 await batch.commit();
+<<<<<<< HEAD
                 logger.log(`Successfully cleared ${staleCount} stale non-GPS user location(s).`);
+=======
+                logger.log(`Successfully reset ${staleCount} stale user(s) and queued hand movements to screen -1.`);
+>>>>>>> 51e0281a187d35503773457d0004bbed60ab7b81
             } else {
                 logger.log("All user locations are up to date. No stale locations found.");
             }
