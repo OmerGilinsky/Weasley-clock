@@ -664,26 +664,6 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
     return _UploadedLocationAsset(ref: ref, downloadUrl: downloadUrl);
   }
 
-  Future<_UploadedLocationAsset> _uploadUserVoiceRecording({
-    required String userId,
-    required _PickedUploadFile file,
-  }) async {
-    final safeFileName = _sanitizeStorageSegment(file.name);
-    final path =
-        'user_voice/$userId/${DateTime.now().millisecondsSinceEpoch}_$safeFileName';
-    final ref = FirebaseStorage.instance.ref(path);
-
-    await ref.putData(
-      file.bytes,
-      SettableMetadata(
-        contentType: _contentTypeForFileName(file.name, 'audio/mpeg'),
-      ),
-    );
-
-    final downloadUrl = await ref.getDownloadURL();
-    return _UploadedLocationAsset(ref: ref, downloadUrl: downloadUrl);
-  }
-
   Future<_UploadedLocationAsset> _uploadLocationAsset({
     required String locationId,
     required String folder,
@@ -1358,53 +1338,6 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
     }
   }
 
-  Future<void> _saveUserVoice() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('You must be logged in to save your voice.'),
-        ),
-      );
-      return;
-    }
-
-    try {
-      final recording = await _recordVoiceMessage();
-      if (recording == null) {
-        return;
-      }
-
-      final uploaded = await _uploadUserVoiceRecording(
-        userId: user.uid,
-        file: recording,
-      );
-
-      await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
-        'user_voice': uploaded.downloadUrl,
-        'userVoiceUpdatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-
-      if (!mounted) {
-        return;
-      }
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Your voice recording was saved.')),
-      );
-    } catch (_) {
-      if (!mounted) {
-        return;
-      }
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Failed to save your voice. Please try again.'),
-        ),
-      );
-    }
-  }
-
   Future<void> _setGpsLocation() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
@@ -1903,7 +1836,6 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
     final formKey = GlobalKey<FormState>();
     final locationController = TextEditingController();
     _PickedUploadFile? imageFile;
-    _PickedUploadFile? audioFile;
     bool isSubmitting = false;
     bool dialogClosing = false;
 
@@ -1963,39 +1895,9 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
                         ? 'Choose Picture (optional)'
                         : 'Picture: ${imageFile!.name}'),
                   ),
-                  const SizedBox(height: 12),
-                  OutlinedButton.icon(
-                    onPressed: isSubmitting
-                        ? null
-                        : () async {
-                            try {
-                              final picked =
-                                  await _pickUploadFile(FileType.audio);
-                              if (picked == null || !dialogContext.mounted) {
-                                return;
-                              }
-                              setDialogState(() {
-                                audioFile = picked;
-                              });
-                            } catch (_) {
-                              if (!mounted) {
-                                return;
-                              }
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                    content:
-                                        Text('Failed to pick an audio file.')),
-                              );
-                            }
-                          },
-                    icon: const Icon(Icons.audiotrack_outlined),
-                    label: Text(audioFile == null
-                        ? 'Choose Sound (optional)'
-                        : 'Sound: ${audioFile!.name}'),
-                  ),
                   const SizedBox(height: 8),
                   const Text(
-                    'Any selected picture or sound will be uploaded to Firebase Storage and linked to this location. The clock angle will be assigned automatically by the backend.',
+                    'Any selected picture will be uploaded to Firebase Storage and linked to this location. The clock angle will be assigned automatically by the backend.',
                   ),
                 ],
               ),
@@ -2072,7 +1974,6 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
 
                       try {
                         String? imageUrl;
-                        String? audioUrl;
 
                         if (imageFile != null) {
                           final uploadedImage = await _uploadLocationAsset(
@@ -2085,22 +1986,10 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
                           imageUrl = uploadedImage.downloadUrl;
                         }
 
-                        if (audioFile != null) {
-                          final uploadedAudio = await _uploadLocationAsset(
-                            locationId: docRef.id,
-                            folder: 'audio',
-                            file: audioFile!,
-                            fallbackContentType: 'audio/mpeg',
-                          );
-                          uploadedRefs.add(uploadedAudio.ref);
-                          audioUrl = uploadedAudio.downloadUrl;
-                        }
-
                         await docRef.set({
                           'id': docRef.id,
                           'locationName': locationName,
                           'imageUrl': imageUrl,
-                          'soundUrl': audioUrl,
                           'createdAt': FieldValue.serverTimestamp(),
                           'updatedAt': FieldValue.serverTimestamp(),
                           'createdBy': widget.userEmail,
@@ -2217,15 +2106,6 @@ class _AdminOptionsScreenState extends State<AdminOptionsScreen> {
               onPressed: _sendGreeting,
               icon: const Icon(Icons.mail),
               label: const Text('Send Greeting'),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 16),
-              ),
-            ),
-            const SizedBox(height: 16),
-            ElevatedButton.icon(
-              onPressed: _saveUserVoice,
-              icon: const Icon(Icons.mic),
-              label: const Text('Record My Voice'),
               style: ElevatedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(vertical: 16),
               ),
