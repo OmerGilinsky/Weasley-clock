@@ -6,11 +6,9 @@ Weasley's Clock is an IoT-based physical grandfather clock inspired by the Harry
 ## Folder description :
 * ESP32: source code for the esp side (firmware).
 * wesleys_clock_backend : Firebase Cloud Functions (v2) and database rules configuration for backend logic.
-* Documentation: wiring diagram + basic operating instructions
+* Documentation: wiring diagram + project poster.
 * Unit Tests: tests for individual hardware components (input / output devices)
 * flutter_app : dart code for our Flutter app.
-* Parameters: contains description of parameters and settings that can be modified IN YOUR CODE
-* Assets: link to 3D printed parts, Audio files used in this project, Fritzing file for connection diagram (FZZ format) etc
 
 ## ESP32 SDK version used in this project: 
 ESP32 Arduino Core version 2.0.17 (using ESP32 Dev Module)
@@ -30,4 +28,3 @@ Poster files can be found under the Assets / Documentation folders.
  
 This project is part of ICST - The Interdisciplinary Center for Smart Technologies, Taub Faculty of Computer Science, Technion
 https://icst.cs.technion.ac.il/
-# Weasley-clock
