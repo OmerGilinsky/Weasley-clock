@@ -14,7 +14,7 @@
 //I2C_GND         GND
 //I2C_LCK         RX2
 //I2C_DIN         TX2
-//I2C_BCK         D5
+//I2C_BCK         D19
 
 //SD_3V3          3V3
 //SD_CS           D15
@@ -25,7 +25,7 @@
 
 //servo_brown     GND
 //servo_red       VIN
-//servo_orange1   D19
+//servo_orange1   D5
 //servo_orange2   D21
 //servo_orange3   D22
 //servo_orange4   D32
@@ -44,8 +44,8 @@
 #include <Audio.h>
 #include <ESP32Servo.h>
 
-#define WIFI_SSID           "Leonid's Fan Club 2.4"
-#define WIFI_PASSWORD       "leonidOS"
+#define WIFI_SSID           "LTD 2.4"
+#define WIFI_PASSWORD       "0543556199"
 
 #define USER_EMAIL          "esp32-wesleys@clock.com"
 #define USER_PASSWORD       "123456"
@@ -489,31 +489,6 @@ bool fetchAndExecuteNextEvent() {
         
         play_sound(audioUrl);
       }
-      
-      HTTPClient httpComplete;
-      httpComplete.begin(COMPLETE_EVENT_URL);
-      httpComplete.addHeader("Content-Type", "application/json");
-
-      // Build the JSON payload to send back to the server
-      JsonDocument completeDoc;
-      completeDoc["eventId"] = queueDocId; 
-      completeDoc["sequenceId"] = eventId; 
-      completeDoc["status"] = "success";
-      completeDoc["errorMessage"] = nullptr;
-      
-      String requestBody;
-      serializeJson(completeDoc, requestBody);
-
-      // Send the POST request
-      int completeResponseCode = httpComplete.POST(requestBody);
-      
-      if (completeResponseCode > 0) {
-        Serial.printf("Successfully completed event %d. Server responded: %d\n", eventId, completeResponseCode);
-      } else {
-        Serial.printf("Failed to complete event %d. Error code: %d\n", eventId, completeResponseCode);
-      }
-      
-      httpComplete.end();
       
       moreEvents = true; // Tell the while loop to run again for the next item
     } 
