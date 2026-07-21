@@ -55,7 +55,7 @@
 #define POP_NEXT_EVENT_URL  "https://us-central1-wesleys-clock.cloudfunctions.net/popNextEsp32Event"
 #define COMPLETE_EVENT_URL  "https://us-central1-wesleys-clock.cloudfunctions.net/completeEsp32Event"
 
-#define FIREBASE_COUNTER    ""
+#define FIREBASE_COUNTER    "/system_status/esp32_queue_state"
 #define FIREBASE_STORAGE    "wesleys-clock.firebasestorage.app"
 
 #define TFT_CS1     13
@@ -91,7 +91,7 @@ TFT_eSPI tft = TFT_eSPI();
 uint8_t currentTargetCS = TFT_CS1;
 uint8_t displays[] = {TFT_CS1, TFT_CS2, TFT_CS3, TFT_CS4};
 
-const char* images[] = {"", "", "", ""};
+String images[] = {"", "", "", ""};
 
 Audio audio;
 bool audioPlaying = false; 
@@ -100,8 +100,6 @@ Servo servoMotor1;
 Servo servoMotor2;
 Servo servoMotor3;
 Servo servoMotor4;
-
-Servo hands[] = {servoMotor1, servoMotor2, servoMotor3, servoMotor4};
 
 int angles1[] = {22, 1, 45, 96, 143};
 int angles2[] = {22, 0, 48, 94, 141};
@@ -146,6 +144,14 @@ void streamTimeoutCallback(bool timeout)
     Serial.printf("error code: %d, reason: %s\n\n", counter.httpCode(), counter.errorReason().c_str());
 }
 
+char* setupImage1 = "/Henesys.jpg";
+char* setupImage2 = "/Ellinia.jpg";
+char* setupImage3 = "/Kerning.jpg";
+char* setupImage4 = "/Perion.jpg";
+char* setupSound = "logo.wav";
+
+int audioVolume = 21;
+
 void setup() {
   Serial.begin(115200);
 
@@ -183,13 +189,52 @@ void setup() {
   TJpgDec.setSwapBytes(true);
   TJpgDec.setCallback(tft_output);
 
-  Serial.println("Turned on displays");
+  targetDisplay(displays[0]);
+  TJpgDec.drawFsJpg(0, 0, setupImage1, SD);
+  targetDisplay(displays[1]);
+  TJpgDec.drawFsJpg(0, 0, setupImage2, SD);
+  targetDisplay(displays[2]);
+  TJpgDec.drawFsJpg(0, 0, setupImage3, SD);
+  targetDisplay(displays[3]);
+  TJpgDec.drawFsJpg(0, 0, setupImage4, SD);
+  delay(1000);
+
+  for (int i = 0; i < 4; i++) {
+    digitalWrite(displays[i], LOW);
+    tft.fillScreen(TFT_BLUE);
+    digitalWrite(displays[i], HIGH);
+  }
+
+  Serial.println("Displays are ready");
   Serial.println();
 
   Serial.println("Setting audio");
 
   audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
-  audio.setVolume(20);
+  audio.setVolume(audioVolume);
+
+  if (audio.connecttoFS(SD, setupSound)) {
+    Serial.println("Audio connection succeeded");
+  } else {
+    Serial.println("Audio connection failed");
+  }
+
+    Serial.print("Playing ");
+    Serial.println(setupSound);
+
+  while (true) {
+    audio.loop();
+    if (audio.isRunning()) {
+      audioPlaying = true;
+    } else if (audioPlaying && !audio.isRunning()) {
+      Serial.println("Stopping audio");
+      audio.stopSong();
+      audioPlaying = false;
+      break;
+    }
+  }
+
+  Serial.println("Finished playing");
 
   Serial.println("Audio set");
   Serial.println();
@@ -200,6 +245,15 @@ void setup() {
   servoMotor2.attach(servo_PWM2);
   servoMotor3.attach(servo_PWM3);
   servoMotor4.attach(servo_PWM4);
+
+  servoMotor1.write(angles1[1]);
+  delay(1000);
+  servoMotor2.write(angles2[1]);
+  delay(1000);
+  servoMotor3.write(angles3[1]);
+  delay(1000);
+  servoMotor4.write(angles4[1]);
+  delay(1000);
 
   servoMotor1.write(angles1[0]);
   delay(1000);
@@ -257,50 +311,74 @@ void update_display(int display, const char* image) {
     Serial.print("Removing location from display ");
     Serial.println(display);
 
+    digitalWrite(displays[display], LOW);
     tft.fillScreen(TFT_BLACK);
+    digitalWrite(displays[display], HIGH);
 
-    SD.remove(images[display]);
+    if (images[display].length() > 0) {
+      SD.remove(images[display].c_str());
+    }
     images[display] = "";
 
   } else {
-    Serial.print("Updating display ");
-    Serial.print(display);
-    Serial.print(" with image ");
-    Serial.println(image);
+    String path = "/" + String(image);
 
     Firebase.ready();
 
-    Firebase.Storage.download(&fbdo, FIREBASE_STORAGE, image, image, mem_storage_type_sd);
+    if (Firebase.Storage.download(&fbdo, FIREBASE_STORAGE, image, path.c_str(), mem_storage_type_sd)) {
+      Serial.println(path + " download succeeded");
+    } else {
+      Serial.println(path + " download failes");
+    }
+
+    Serial.print("Updating display ");
+    Serial.print(display);
+    Serial.print(" with image ");
+    Serial.println(path);
 
     targetDisplay(displays[display]);
-    TJpgDec.drawFsJpg(0, 0, image, SD);
+    TJpgDec.drawFsJpg(0, 0, path.c_str(), SD);
 
-    SD.remove(images[display]);
-    images[display] = image;
+    if (images[display].length() > 0) {
+      SD.remove(images[display].c_str());
+    }
+    images[display] = path;
   }
 }
 
 //display, int{0-4} - the one used to show the picture
 //picture, char* - jpg to be shown for 5 seconds
 void show_picture(int display, const char* picture) {
+  String path = "/" + String(picture);
+
+  Firebase.ready();
+
+  if (Firebase.Storage.download(&fbdo, FIREBASE_STORAGE, picture, path.c_str(), mem_storage_type_sd)) {
+    Serial.println(path + " download succeeded");
+  } else {
+    Serial.println(path + " download failes");
+  }
+
   Serial.print("Showing picture ");
   Serial.print(picture);
   Serial.print(" on display ");
   Serial.println(display);
 
-  Firebase.ready();
-
-  Firebase.Storage.download(&fbdo, FIREBASE_STORAGE, picture, picture, mem_storage_type_sd);
-
   targetDisplay(displays[display]);
-  TJpgDec.drawFsJpg(0, 0, picture, SD);
+  TJpgDec.drawFsJpg(0, 0, path.c_str(), SD);
   delay(5000);
-  TJpgDec.drawFsJpg(0, 0, images[display], SD);
+  if (images[display].length() > 0) {
+    TJpgDec.drawFsJpg(0, 0, images[display].c_str(), SD);
+  } else {
+    digitalWrite(displays[display], LOW);
+    tft.fillScreen(TFT_BLACK);
+    digitalWrite(displays[display], HIGH);
+  }
 
-  SD.remove(picture);
+  SD.remove(path.c_str());
 }
 
-//hand, int{1-4} - the one represting the person that moved locations
+//hand, int{0-3} - the one represting the person that moved locations
 //display, int{0-4} - the one that represent the location the person moved to
 void move_hand(int hand, int display) {
   Serial.print("Moving hand ");
@@ -309,35 +387,52 @@ void move_hand(int hand, int display) {
   Serial.println(display);
 
   switch(hand) {
-    case 1: hands[hand].write(angles1[display]); break;
-    case 2: hands[hand].write(angles2[display]); break;
-    case 3: hands[hand].write(angles3[display]); break;
-    case 4: hands[hand].write(angles4[display]); break;
+    case 0: servoMotor1.write(angles1[display]); break;
+    case 1: servoMotor2.write(angles2[display]); break;
+    case 2: servoMotor3.write(angles3[display]); break;
+    case 3: servoMotor4.write(angles4[display]); break;
   }
 }
 
 //sound, char* - mp3 to play fully as a messege
 void play_sound(const char* sound) {
-  Serial.print("Playing sound ");
-  Serial.println(sound);
+  String path = "/" + String(sound);
 
   Firebase.ready();
 
-  Firebase.Storage.download(&fbdo, FIREBASE_STORAGE, sound, sound, mem_storage_type_sd);
-  
-  audio.connecttoFS(SD, sound);
+  if (Firebase.Storage.download(&fbdo, FIREBASE_STORAGE, sound, path.c_str(), mem_storage_type_sd)) {
+    Serial.println(path + " download succeeded");
+  } else {
+    Serial.println(path + " download failed");
+    return;
+  }
+
+  if (audio.connecttoFS(SD, path.c_str())) {
+    Serial.println("Audio connection succeeded");
+  } else {
+    Serial.println("Audio connection failed");
+    SD.remove(path.c_str());
+    return;
+  }
+
+  Serial.print("Playing sound ");
+  Serial.println(path);
+
   while (true) {
     audio.loop();
     if (audio.isRunning()) {
       audioPlaying = true;
     } else if (audioPlaying && !audio.isRunning()) {
+      Serial.println("Stopping audio");
       audio.stopSong();
       audioPlaying = false;
       break;
     }
   }
 
-  SD.remove(sound);
+  Serial.print("Finished playing ");
+
+  SD.remove(path.c_str());
 }
 
 bool fetchAndExecuteNextEvent() {
@@ -375,7 +470,7 @@ bool fetchAndExecuteNextEvent() {
         int handNumber = doc["event"]["payload"]["handNumber"];
         int screenNumber = doc["event"]["payload"]["screenNumber"];
         
-        move_hand(handNumber, screenNumber);
+        move_hand(handNumber, screenNumber + 1);
       } 
       else if (String(eventType) == "update_display") {
         int screenNumber = doc["event"]["payload"]["screenNumber"];
@@ -458,9 +553,11 @@ void loop() {
     bool keepExecuting = true;
 
     while (keepExecuting) {
+      Serial.println("Executing next event");
       keepExecuting = fetchAndExecuteNextEvent();
       delay(500);
     }
     
+    Serial.println("Finished executing pending events");
   }
 }
