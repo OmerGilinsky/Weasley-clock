@@ -37,6 +37,7 @@ const ESP32_QUEUE_STATE_DOC = db.collection("system_status").doc("esp32_queue_st
 const ESP32_QUEUE_STATE_RTDB_PATH = "system_status/esp32_queue_state";
 const MEDIA_CONVERSIONS_COLLECTION = "media_conversions";
 const execFileAsync = promisify(execFile);
+const AUDIO_CONVERSION_PROFILE = "mp3_44100_stereo_128k_cbr_5s_v1";
 
 type Esp32QueueEventType =
     | "play_picture"
@@ -96,7 +97,7 @@ async function ensureMp3AudioUrl(audioUrl: string): Promise<string | null> {
         return null;
     }
 
-    const sourceHash = createHash("sha1").update(sourceUrl).digest("hex");
+    const sourceHash = createHash("sha1").update(`${sourceUrl}|${AUDIO_CONVERSION_PROFILE}`).digest("hex");
     const conversionRef = db.collection(MEDIA_CONVERSIONS_COLLECTION).doc(sourceHash);
     const existing = await conversionRef.get();
     if (existing.exists) {
@@ -128,6 +129,7 @@ async function ensureMp3AudioUrl(audioUrl: string): Promise<string | null> {
         await execFileAsync(ffmpegBinary, [
             "-y",
             "-i", inputPath,
+            "-t", "5",
             "-vn",
             "-acodec", "libmp3lame",
             "-ar", "44100",
