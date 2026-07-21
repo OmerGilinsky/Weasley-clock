@@ -385,7 +385,12 @@ async function sanitizeEsp32Payload(eventType: Esp32QueueEventType, payload: Rec
             sanitizedPayload.pictureUrl = jpegPath;
         }
 
-        sanitizedPayload.picture = sanitizedPayload.pictureUrl;
+        if (eventType === "update_display" && payload.picture === null && !pictureUrl) {
+            sanitizedPayload.picture = null;
+        } else {
+            sanitizedPayload.picture = sanitizedPayload.pictureUrl;
+        }
+
         sanitizedPayload.screenSize = { width: 280, height: 240 };
     }
 
@@ -555,6 +560,104 @@ async function enqueueEsp32Event(input: QueueEventInput): Promise<string> {
     logger.log(`Queued ESP32 event '${input.eventType}' as ${eventRef.id}`);
     return eventRef.id;
 }
+
+async function queueStartupSyncEvents(): Promise<{displayEventsQueued: number; handEventsQueued: number}> {
+    const locationsSnapshot = await db.collection("locations").get();
+    const locationScreenByName = new Map<string, number>();
+
+    let displayEventsQueued = 0;
+    for (const locationDoc of locationsSnapshot.docs) {
+        const locationData = locationDoc.data() as Record<string, unknown>;
+        const screenNumber = readLocationScreenNumber(locationData);
+        const locationName = readStringField(locationData, ["locationName", "name"]);
+
+        if (screenNumber === null || !locationName) {
+            continue;
+        }
+
+        const picture = readPictureUrl(locationData) ?? buildLocationPlaceholderImageUrl(locationName);
+
+        await enqueueEsp32Event({
+            eventType: "update_display",
+            payload: {
+                screenNumber,
+                picture,
+            },
+            sourceCollection: "locations",
+            sourceId: locationDoc.id,
+        });
+
+        locationScreenByName.set(locationName, screenNumber);
+        displayEventsQueued++;
+    }
+
+    const usersSnapshot = await db.collection("users").get();
+    let handEventsQueued = 0;
+
+    for (const userDoc of usersSnapshot.docs) {
+        const userData = userDoc.data() as Record<string, unknown>;
+        const handNumber = readNumericField(userData, ["handNumber"]);
+
+        if (handNumber === null || handNumber < 0 || handNumber > 3) {
+            continue;
+        }
+
+        const currentLocation = readStringField(userData, ["currentLocation"]);
+        const locationScreen = currentLocation ? locationScreenByName.get(currentLocation) : undefined;
+        const targetScreenNumber = readNumericField(userData, ["targetScreenNumber"]);
+
+        let screenNumber = -1;
+        if (typeof locationScreen === "number") {
+            screenNumber = locationScreen;
+        } else if (targetScreenNumber !== null && targetScreenNumber >= 0 && targetScreenNumber <= 3) {
+            screenNumber = targetScreenNumber;
+        }
+
+        await enqueueEsp32Event({
+            eventType: "move_clock_hand",
+            userId: userDoc.id,
+            handNumber,
+            payload: {
+                handNumber,
+                screenNumber,
+                locationName: currentLocation ?? null,
+            },
+            sourceCollection: "users",
+            sourceId: userDoc.id,
+        });
+
+        handEventsQueued++;
+    }
+
+    return {displayEventsQueued, handEventsQueued};
+}
+
+/**
+ * HTTP Request Function: queueEsp32StateSync
+ * Trigger: ESP32 calls this endpoint when it wants to enqueue full state sync.
+ * Purpose: Enqueue update_display and move_clock_hand events as normal queue items.
+ */
+export const queueEsp32StateSync = onRequest(async (request, response) => {
+    if (request.method !== "GET") {
+        response.status(405).json({error: "Method Not Allowed. Please use GET."});
+        return;
+    }
+
+    try {
+        const syncResult = await queueStartupSyncEvents();
+
+        logger.log(`ESP32 requested state sync. Queued displays: ${syncResult.displayEventsQueued}, hands: ${syncResult.handEventsQueued}.`);
+
+        response.status(200).json({
+            status: "success",
+            displayEventsQueued: syncResult.displayEventsQueued,
+            handEventsQueued: syncResult.handEventsQueued,
+        });
+    } catch (error) {
+        logger.error("Failed to queue ESP32 state sync:", error);
+        response.status(500).json({error: "Internal Server Error"});
+    }
+});
 
 async function findUserByMessageData(messageData: Record<string, unknown>) {
     const targetUserId = readStringField(messageData, ["targetUserId", "recipientId", "userId"]);
