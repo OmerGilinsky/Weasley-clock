@@ -304,6 +304,21 @@ void setup() {
   Serial.println();
 }
 
+void printMemoryReport() {
+  Serial.println("====== ESP32 Memory Report ======");
+  Serial.printf("Total Free Heap : %d bytes\n", ESP.getFreeHeap());
+  Serial.printf("Max Alloc Block : %d bytes\n", ESP.getMaxAllocHeap());
+  Serial.printf("Lowest Heap Ever: %d bytes\n", ESP.getMinFreeHeap());
+  Serial.println("=================================");
+}
+
+void cleanUpRAM() {
+  fbdo.clear();
+  delay(10);
+  Serial.printf("[RAM Cleaned] Free Heap: %u bytes | Max Block: %u bytes\n", 
+                ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+}
+
 //display, int{0-4} - the one used to represent the location
 //image, char* - 280x240 jpg epresenting the location
 void update_display(int display, const char* image) {
@@ -312,7 +327,7 @@ void update_display(int display, const char* image) {
     Serial.println(display);
 
     digitalWrite(displays[display], LOW);
-    tft.fillScreen(TFT_BLACK);
+    tft.fillScreen(TFT_BLUE);
     digitalWrite(displays[display], HIGH);
 
     if (images[display].length() > 0) {
@@ -323,12 +338,19 @@ void update_display(int display, const char* image) {
   } else {
     String path = "/" + String(image);
 
-    Firebase.ready();
-
     if (Firebase.Storage.download(&fbdo, FIREBASE_STORAGE, image, path.c_str(), mem_storage_type_sd)) {
-      Serial.println(path + " download succeeded");
+      Serial.println(path + " download reported success.");
+    }
+
+    delay(1000);
+
+    if (SD.exists(path.c_str())) {
+      File f = SD.open(path.c_str(), FILE_READ);
+      Serial.printf("File verified on SD! Actual File Size: %d bytes\n", f.size());
+      f.close();
     } else {
-      Serial.println(path + " download failes");
+      Serial.println("CRITICAL ERROR: download reported success, but file DOES NOT exist on SD!");
+      return;
     }
 
     Serial.print("Updating display ");
@@ -354,9 +376,18 @@ void show_picture(int display, const char* picture) {
   Firebase.ready();
 
   if (Firebase.Storage.download(&fbdo, FIREBASE_STORAGE, picture, path.c_str(), mem_storage_type_sd)) {
-    Serial.println(path + " download succeeded");
+    Serial.println(path + " download reported success.");
+  }
+
+  delay(1000);
+
+  if (SD.exists(path.c_str())) {
+    File f = SD.open(path.c_str(), FILE_READ);
+    Serial.printf("File verified on SD! Actual File Size: %d bytes\n", f.size());
+    f.close();
   } else {
-    Serial.println(path + " download failes");
+    Serial.println("CRITICAL ERROR: download reported success, but file DOES NOT exist on SD!");
+    return;
   }
 
   Serial.print("Showing picture ");
@@ -371,7 +402,7 @@ void show_picture(int display, const char* picture) {
     TJpgDec.drawFsJpg(0, 0, images[display].c_str(), SD);
   } else {
     digitalWrite(displays[display], LOW);
-    tft.fillScreen(TFT_BLACK);
+    tft.fillScreen(TFT_BLUE);
     digitalWrite(displays[display], HIGH);
   }
 
@@ -401,9 +432,17 @@ void play_sound(const char* sound) {
   Firebase.ready();
 
   if (Firebase.Storage.download(&fbdo, FIREBASE_STORAGE, sound, path.c_str(), mem_storage_type_sd)) {
-    Serial.println(path + " download succeeded");
+    Serial.println(path + " download reported success.");
+  }
+
+  delay(1000);
+
+  if (SD.exists(path.c_str())) {
+    File f = SD.open(path.c_str(), FILE_READ);
+    Serial.printf("File verified on SD! Actual File Size: %d bytes\n", f.size());
+    f.close();
   } else {
-    Serial.println(path + " download failed");
+    Serial.println("CRITICAL ERROR: download reported success, but file DOES NOT exist on SD!");
     return;
   }
 
@@ -445,6 +484,8 @@ bool fetchAndExecuteNextEvent() {
   if (httpPopResponseCode > 0) {
     String jsonResponse = httpPop.getString();
     Serial.println("Received JSON: " + jsonResponse);
+
+    httpPop.end();
 
     JsonDocument doc; 
     DeserializationError error = deserializeJson(doc, jsonResponse);
@@ -504,10 +545,9 @@ bool fetchAndExecuteNextEvent() {
   else {
     Serial.print("Error code on HTTP Request: ");
     Serial.println(httpPopResponseCode);
+    httpPop.end();
     moreEvents = false; // Error occurred, break the loop
   }
-
-  httpPop.end();
 
   return moreEvents;
 }
@@ -521,18 +561,26 @@ void loop() {
 
   if (dataChanged)
   {
+
     dataChanged = false;
 
+    cleanUpRAM();
+
     Serial.println("Queue change recognized");
+
+    counter.pauseFirebase(true);
 
     bool keepExecuting = true;
 
     while (keepExecuting) {
       Serial.println("Executing next event");
+
       keepExecuting = fetchAndExecuteNextEvent();
       delay(500);
     }
-    
+
+    counter.pauseFirebase(false);
+
     Serial.println("Finished executing pending events");
   }
 }
