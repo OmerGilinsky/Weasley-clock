@@ -385,7 +385,12 @@ async function sanitizeEsp32Payload(eventType: Esp32QueueEventType, payload: Rec
             sanitizedPayload.pictureUrl = jpegPath;
         }
 
-        sanitizedPayload.picture = sanitizedPayload.pictureUrl;
+        if (eventType === "update_display" && payload.picture === null && !pictureUrl) {
+            sanitizedPayload.picture = null;
+        } else {
+            sanitizedPayload.picture = sanitizedPayload.pictureUrl;
+        }
+
         sanitizedPayload.screenSize = { width: 280, height: 240 };
     }
 
