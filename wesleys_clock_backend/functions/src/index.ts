@@ -130,10 +130,12 @@ async function ensureMp3AudioUrl(audioUrl: string): Promise<string | null> {
             "-i", inputPath,
             "-vn",
             "-acodec", "libmp3lame",
-            "-ar", "12000",
-            "-ac", "1",
-            "-b:a", "8k",
-            "-af", "lowpass=f=2800,highpass=f=220",
+            "-ar", "44100",
+            "-ac", "2",
+            "-b:a", "128k",
+            "-minrate", "128k",
+            "-maxrate", "128k",
+            "-bufsize", "256k",
             outputPath,
         ]);
 
