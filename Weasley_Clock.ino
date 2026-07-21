@@ -94,7 +94,7 @@ uint8_t displays[] = {TFT_CS1, TFT_CS2, TFT_CS3, TFT_CS4};
 String images[] = {"", "", "", ""};
 
 Audio audio;
-bool audioPlaying = false; 
+bool audioPlaying = false;
 
 Servo servoMotor1;
 Servo servoMotor2;
@@ -165,6 +165,39 @@ void setup() {
   Serial.println("SD Card mounted successfully");
   Serial.println();
 
+  Serial.println("Setting audio");
+
+  audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+  audio.setVolume(audioVolume);
+
+  if (audio.connecttoFS(SD, setupSound)) {
+    Serial.println("Audio connection succeeded");
+  } else {
+    Serial.println("Audio connection failed");
+  }
+
+  delay(500);
+  
+  Serial.print("Playing ");
+  Serial.println(setupSound);
+
+  while (true) {
+    audio.loop();
+    if (audio.isRunning()) {
+      audioPlaying = true;
+    } else if (audioPlaying && !audio.isRunning()) {
+      Serial.println("Stopping audio");
+      audio.stopSong();
+      audioPlaying = false;
+      break;
+    }
+  }
+
+  Serial.println("Finished playing");
+
+  Serial.println("Audio set");
+  Serial.println();
+
   Serial.println("Turning on displays");
 
   pinMode(TFT_CS1, OUTPUT);
@@ -206,39 +239,6 @@ void setup() {
   }
 
   Serial.println("Displays are ready");
-  Serial.println();
-
-  Serial.println("Setting audio");
-
-  audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
-  audio.setVolume(audioVolume);
-
-  if (audio.connecttoFS(SD, setupSound)) {
-    Serial.println("Audio connection succeeded");
-  } else {
-    Serial.println("Audio connection failed");
-  }
-
-  delay(500);
-  
-  Serial.print("Playing ");
-  Serial.println(setupSound);
-
-  while (true) {
-    audio.loop();
-    if (audio.isRunning()) {
-      audioPlaying = true;
-    } else if (audioPlaying && !audio.isRunning()) {
-      Serial.println("Stopping audio");
-      audio.stopSong();
-      audioPlaying = false;
-      break;
-    }
-  }
-
-  Serial.println("Finished playing");
-
-  Serial.println("Audio set");
   Serial.println();
 
   Serial.println("Aligning servos");
@@ -541,7 +541,7 @@ bool fetchAndExecuteNextEvent() {
       else if (String(eventType) == "play_voice") {
         const char* audioUrl = doc["event"]["payload"]["audioUrl"];
         char* urlCopy = strdup(audioUrl);
-        
+
         xTaskCreatePinnedToCore(play_sound, "play_sound", 16384, (void*)urlCopy, 5, nullptr, 0);
       }
       
@@ -587,6 +587,7 @@ void loop() {
     bool keepExecuting = true;
 
     while (keepExecuting) {
+
       Serial.println("Executing next event");
 
       keepExecuting = fetchAndExecuteNextEvent();
