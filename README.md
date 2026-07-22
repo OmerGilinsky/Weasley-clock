@@ -32,6 +32,7 @@ The connection diagrams and pin schematics for the SPI bus (SD Card and TFT Disp
 
 ## Project Poster:
 Poster files can be found under the Assets / Documentation folders.
+**[לחץ כאן לצפייה בפוסטר הפרויקט (PDF)](https://github.com/OmerGilinsky/Weasley-clock/blob/main/Documentation/IOT%20Poster%20Pattern%2097x67.pdf)*
  
 This project is part of ICST - The Interdisciplinary Center for Smart Technologies, Taub Faculty of Computer Science, Technion
 https://icst.cs.technion.ac.il/
