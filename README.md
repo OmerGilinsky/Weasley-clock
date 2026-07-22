@@ -19,13 +19,14 @@ ESP32 Arduino Core version 2.0.17 (using ESP32 Dev Module)
 * ESP32-audioI2S - version 3.0.0 (by Wolle)
 * ArduinoJson - version 6.21.3 (by Benoit Blanchon)
 * Adafruit GFX Library & ST7789 Library
-## hardware :
-* ESP32 Dev Module
-* MG995 Servo Motors
-* ST7789 Color TFT LCD (240x280)
-* MAX98357A I2S Audio DAC
-* 8Ω 3W Audio Speaker
-* Micro SD Card Module (SPI)
+## Hardware & Quantities:
+* ESP32 Dev Module (Qty: 1)
+* MG995 Servo Motors (Qty: 4)
+* ST7789 Color TFT LCD 240x280 (Qty: 4)
+* MAX98357A I2S Audio DAC (Qty: 1)
+* 8Ω 3W Audio Speaker (Qty: 1)
+* Micro SD Card Module SPI (Qty: 1)
+
 
 ## Connection diagram:
 The connection diagrams and pin schematics for the SPI bus (SD Card and TFT Displays), I2S DAC, and MG995 servos are documented under the Documentation folder.
