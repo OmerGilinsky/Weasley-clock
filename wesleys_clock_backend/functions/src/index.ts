@@ -180,6 +180,130 @@ async function ensureMp3AudioUrl(audioUrl: string): Promise<string | null> {
     }
 }
 
+async function ensureCombinedMp3AudioPath(firstAudio: string, secondAudio: string): Promise<string | null> {
+    const firstSource = firstAudio.trim();
+    const secondSource = secondAudio.trim();
+    if (!firstSource || !secondSource) {
+        return null;
+    }
+
+    const ffmpegBinary = typeof ffmpegPath === "string" ? ffmpegPath : null;
+    if (!ffmpegBinary) {
+        logger.error("ffmpeg-static binary is unavailable. Cannot combine audio.");
+        return null;
+    }
+
+    const sourceHash = createHash("sha1")
+        .update(`${firstSource}|${secondSource}|mp3_concat_2step_v1`)
+        .digest("hex");
+    const conversionRef = db.collection(MEDIA_CONVERSIONS_COLLECTION).doc(sourceHash);
+    const existing = await conversionRef.get();
+    if (existing.exists) {
+        const existingData = existing.data() as Record<string, unknown>;
+        const existingCombinedPath = readStringField(existingData, ["combinedPath"]);
+        if (existingCombinedPath) {
+            return existingCombinedPath;
+        }
+        const existingMp3Url = readStringField(existingData, ["mp3Url"]);
+        if (existingMp3Url) {
+            return getStoragePath(existingMp3Url);
+        }
+    }
+
+    await conversionRef.set({
+        sourceAudioA: firstSource,
+        sourceAudioB: secondSource,
+        status: "processing",
+        profile: "mp3_concat_2step_v1",
+        updatedAt: FieldValue.serverTimestamp(),
+    }, {merge: true});
+
+    const bucket = getStorage().bucket();
+    const sourceAPath = firstSource.startsWith("http") ? firstSource : getStoragePath(firstSource).replace(/^\/+/, "");
+    const sourceBPath = secondSource.startsWith("http") ? secondSource : getStoragePath(secondSource).replace(/^\/+/, "");
+
+    const inputAPath = join(tmpdir(), `esp32-audio-combine-${sourceHash}-a.input`);
+    const inputBPath = join(tmpdir(), `esp32-audio-combine-${sourceHash}-b.input`);
+    const outputPath = join(tmpdir(), `esp32-audio-combine-${sourceHash}.mp3`);
+
+    try {
+        let sourceABuffer: Buffer;
+        if (sourceAPath.startsWith("http")) {
+            const response = await fetch(sourceAPath);
+            if (!response.ok) {
+                throw new Error(`Failed to download first audio. HTTP ${response.status}`);
+            }
+            sourceABuffer = Buffer.from(await response.arrayBuffer());
+        } else {
+            if (!sourceAPath) {
+                throw new Error("First audio source path is empty.");
+            }
+            const [downloaded] = await bucket.file(sourceAPath).download();
+            sourceABuffer = downloaded;
+        }
+
+        let sourceBBuffer: Buffer;
+        if (sourceBPath.startsWith("http")) {
+            const response = await fetch(sourceBPath);
+            if (!response.ok) {
+                throw new Error(`Failed to download second audio. HTTP ${response.status}`);
+            }
+            sourceBBuffer = Buffer.from(await response.arrayBuffer());
+        } else {
+            if (!sourceBPath) {
+                throw new Error("Second audio source path is empty.");
+            }
+            const [downloaded] = await bucket.file(sourceBPath).download();
+            sourceBBuffer = downloaded;
+        }
+
+        await writeFile(inputAPath, sourceABuffer);
+        await writeFile(inputBPath, sourceBBuffer);
+
+        await execFileAsync(ffmpegBinary, [
+            "-y",
+            "-i", inputAPath,
+            "-i", inputBPath,
+            "-filter_complex", "[0:a][1:a]concat=n=2:v=0:a=1[a]",
+            "-map", "[a]",
+            "-acodec", "libmp3lame",
+            "-ar", "44100",
+            "-ac", "2",
+            "-b:a", "128k",
+            outputPath,
+        ]);
+
+        const destination = `esp32_audio/combined/${sourceHash}.mp3`;
+        await bucket.upload(outputPath, {
+            destination,
+            metadata: {
+                contentType: "audio/mpeg",
+            },
+        });
+
+        await conversionRef.set({
+            status: "ready",
+            combinedPath: destination,
+            updatedAt: FieldValue.serverTimestamp(),
+        }, {merge: true});
+
+        return destination;
+    } catch (error) {
+        await conversionRef.set({
+            status: "failed",
+            lastError: error instanceof Error ? error.message : String(error),
+            updatedAt: FieldValue.serverTimestamp(),
+        }, {merge: true});
+
+        logger.error(`Failed to combine location/user audio for ESP32: ${firstSource} + ${secondSource}`, error);
+        return null;
+    } finally {
+        await unlink(inputAPath).catch(() => undefined);
+        await unlink(inputBPath).catch(() => undefined);
+        await unlink(outputPath).catch(() => undefined);
+    }
+}
+
 // async function sanitizeEsp32Payload(eventType: Esp32QueueEventType, payload: Record<string, unknown>): Promise<SanitizedQueueEvent> {
 //     const sanitizedPayload: Record<string, unknown> = {...payload};
 
@@ -965,39 +1089,6 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
 
         if (finalLocation && locationDataForQueue) {
             const screen = readLocationScreenNumber(locationDataForQueue) ?? fallbackScreen;
-            const locationSoundUrl = readLocationSoundUrl(locationDataForQueue);
-            const userVoiceUrl = readAudioUrl(afterDataMap);
-
-            if (locationSoundUrl && userVoiceUrl) {
-                await enqueueEsp32Event({
-                    eventType: "play_voice",
-                    userId,
-                    handNumber: handNumber === null ? undefined : handNumber,
-                    payload: {
-                        screen,
-                        audioUrl: locationSoundUrl,
-                        source: "location_sound",
-                        locationName: finalLocation,
-                    },
-                    sourceCollection: "users",
-                    sourceId: userId,
-                });
-
-                await enqueueEsp32Event({
-                    eventType: "play_voice",
-                    userId,
-                    handNumber: handNumber === null ? undefined : handNumber,
-                    payload: {
-                        screen,
-                        audioUrl: userVoiceUrl,
-                        source: "user_voice",
-                        locationName: finalLocation,
-                    },
-                    sourceCollection: "users",
-                    sourceId: userId,
-                });
-            }
-
             await enqueueEsp32Event({
                 eventType: "move_clock_hand",
                 userId,
@@ -1010,6 +1101,29 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
                 sourceCollection: "users",
                 sourceId: userId,
             });
+
+            const locationSoundUrl = readLocationSoundUrl(locationDataForQueue);
+            const userVoiceUrl = readAudioUrl(afterDataMap);
+            if (locationSoundUrl && userVoiceUrl) {
+                const combinedAudioPath = await ensureCombinedMp3AudioPath(locationSoundUrl, userVoiceUrl);
+                if (combinedAudioPath) {
+                    await enqueueEsp32Event({
+                        eventType: "play_voice",
+                        userId,
+                        handNumber: handNumber === null ? undefined : handNumber,
+                        payload: {
+                            screen,
+                            audioUrl: combinedAudioPath,
+                            source: "location_and_user_combined",
+                            locationName: finalLocation,
+                        },
+                        sourceCollection: "users",
+                        sourceId: userId,
+                    });
+                } else {
+                    logger.warn(`Could not combine sounds for user ${userId} at location '${finalLocation}'.`);
+                }
+            }
         } else {
             await enqueueEsp32Event({
                 eventType: "move_clock_hand",
