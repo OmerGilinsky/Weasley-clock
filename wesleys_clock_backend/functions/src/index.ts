@@ -180,7 +180,11 @@ async function ensureMp3AudioUrl(audioUrl: string): Promise<string | null> {
     }
 }
 
-async function ensureCombinedMp3AudioPath(firstAudio: string, secondAudio: string): Promise<string | null> {
+async function ensureCombinedMp3AudioPath(
+    firstAudio: string,
+    secondAudio: string,
+    options?: { cacheKey?: string },
+): Promise<string | null> {
     const firstSource = firstAudio.trim();
     const secondSource = secondAudio.trim();
     if (!firstSource || !secondSource) {
@@ -193,32 +197,54 @@ async function ensureCombinedMp3AudioPath(firstAudio: string, secondAudio: strin
         return null;
     }
 
+    const bucket = getStorage().bucket("wesleys-clock.firebasestorage.app");
+
+    const buildSourceSignature = async (source: string): Promise<string> => {
+        const normalized = source.trim();
+        if (!normalized) {
+            return "empty";
+        }
+
+        const maybePath = normalized.startsWith("http") ? getStoragePath(normalized) : normalized;
+        if (!maybePath.startsWith("http")) {
+            const storagePath = maybePath.replace(/^\/+/, "");
+            if (!storagePath) {
+                return normalized;
+            }
+            try {
+                const [metadata] = await bucket.file(storagePath).getMetadata();
+                const generation = metadata.generation ?? "na";
+                const size = metadata.size ?? "na";
+                const updated = metadata.updated ?? "na";
+                return `${storagePath}|gen:${generation}|size:${size}|updated:${updated}`;
+            } catch {
+                return `${storagePath}|missing`;
+            }
+        }
+
+        return normalized;
+    };
+
+    const firstSignature = await buildSourceSignature(firstSource);
+    const secondSignature = await buildSourceSignature(secondSource);
+    const cacheKey = options?.cacheKey?.trim() || "shared";
     const sourceHash = createHash("sha1")
-        .update(`${firstSource}|${secondSource}|mp3_concat_2step_v1`)
+        .update(`${firstSignature}|${secondSignature}|${cacheKey}|mp3_concat_2step_v3`)
         .digest("hex");
+
     const conversionRef = db.collection(MEDIA_CONVERSIONS_COLLECTION).doc(sourceHash);
-    const existing = await conversionRef.get();
-    if (existing.exists) {
-        const existingData = existing.data() as Record<string, unknown>;
-        const existingCombinedPath = readStringField(existingData, ["combinedPath"]);
-        if (existingCombinedPath) {
-            return existingCombinedPath;
-        }
-        const existingMp3Url = readStringField(existingData, ["mp3Url"]);
-        if (existingMp3Url) {
-            return getStoragePath(existingMp3Url);
-        }
-    }
 
     await conversionRef.set({
         sourceAudioA: firstSource,
         sourceAudioB: secondSource,
+        sourceSignatureA: firstSignature,
+        sourceSignatureB: secondSignature,
+        cacheKey,
         status: "processing",
-        profile: "mp3_concat_2step_v1",
+        profile: "mp3_concat_2step_v3",
         updatedAt: FieldValue.serverTimestamp(),
     }, {merge: true});
 
-    const bucket = getStorage().bucket();
     const sourceAPath = firstSource.startsWith("http") ? firstSource : getStoragePath(firstSource).replace(/^\/+/, "");
     const sourceBPath = secondSource.startsWith("http") ? secondSource : getStoragePath(secondSource).replace(/^\/+/, "");
 
@@ -264,34 +290,63 @@ async function ensureCombinedMp3AudioPath(firstAudio: string, secondAudio: strin
             "-y",
             "-i", inputAPath,
             "-i", inputBPath,
-            "-filter_complex", "[0:a][1:a]concat=n=2:v=0:a=1[a]",
+            "-filter_complex",
+            "[0:a]atrim=0:5,asetpts=PTS-STARTPTS,aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[a0];" +
+            "[1:a]atrim=0:5,asetpts=PTS-STARTPTS,aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo[a1];" +
+            "[a0][a1]concat=n=2:v=0:a=1[a]",
             "-map", "[a]",
+            "-t", "10",
+            "-vn",
             "-acodec", "libmp3lame",
             "-ar", "44100",
             "-ac", "2",
             "-b:a", "128k",
+            "-minrate", "128k",
+            "-maxrate", "128k",
+            "-bufsize", "256k",
             outputPath,
         ]);
 
         const destination = `esp32_audio/combined/${sourceHash}.mp3`;
+        const downloadToken = randomUUID();
         await bucket.upload(outputPath, {
             destination,
             metadata: {
                 contentType: "audio/mpeg",
+                metadata: {
+                    firebaseStorageDownloadTokens: downloadToken,
+                    sourceAudioA: firstSource,
+                    sourceAudioB: secondSource,
+                },
             },
         });
+
+        const mp3Url = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(destination)}?alt=media&token=${downloadToken}`;
 
         await conversionRef.set({
             status: "ready",
             combinedPath: destination,
+            mp3Url,
+            bucketName: bucket.name,
+            audioFormat: "mp3",
+            audioProfile: AUDIO_CONVERSION_PROFILE,
             updatedAt: FieldValue.serverTimestamp(),
         }, {merge: true});
 
         return destination;
     } catch (error) {
+        const execError = error as {message?: string; stderr?: string; stdout?: string};
+        const detailedError = [
+            execError?.message,
+            execError?.stderr ? `stderr: ${execError.stderr}` : null,
+            execError?.stdout ? `stdout: ${execError.stdout}` : null,
+        ]
+            .filter((part) => typeof part === "string" && part.trim() !== "")
+            .join(" | ");
+
         await conversionRef.set({
             status: "failed",
-            lastError: error instanceof Error ? error.message : String(error),
+            lastError: detailedError || (error instanceof Error ? error.message : String(error)),
             updatedAt: FieldValue.serverTimestamp(),
         }, {merge: true});
 
@@ -536,9 +591,13 @@ async function sanitizeEsp32Payload(eventType: Esp32QueueEventType, payload: Rec
         let finalAudioPath: string | null = null;
 
         if (audioUrl.startsWith("http")) {
-            const convertedUrl = await ensureMp3AudioUrl(audioUrl);
-            if (convertedUrl) {
-                finalAudioPath = getStoragePath(convertedUrl);
+            if (isMp3Url(audioUrl)) {
+                finalAudioPath = getStoragePath(audioUrl);
+            } else {
+                const convertedUrl = await ensureMp3AudioUrl(audioUrl);
+                if (convertedUrl) {
+                    finalAudioPath = getStoragePath(convertedUrl);
+                }
             }
         } else if (isMp3Url(storagePathAudio)) {
             finalAudioPath = storagePathAudio;
@@ -1105,7 +1164,13 @@ export const onUserLocationChanged = onDocumentUpdated("users/{userId}", async (
             const locationSoundUrl = readLocationSoundUrl(locationDataForQueue);
             const userVoiceUrl = readAudioUrl(afterDataMap);
             if (locationSoundUrl && userVoiceUrl) {
-                const combinedAudioPath = await ensureCombinedMp3AudioPath(locationSoundUrl, userVoiceUrl);
+                const combinedAudioPath = await ensureCombinedMp3AudioPath(
+                    userVoiceUrl,
+                    locationSoundUrl,
+                    {
+                        cacheKey: `${userId}|${finalLocation}|${Date.now()}`,
+                    },
+                );
                 if (combinedAudioPath) {
                     await enqueueEsp32Event({
                         eventType: "play_voice",
