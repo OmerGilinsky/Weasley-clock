@@ -44,19 +44,7 @@
 #include <Audio.h>
 #include <ESP32Servo.h>
 
-#define WIFI_SSID           "LTD 2.4"
-#define WIFI_PASSWORD       "0543556199"
-
-#define USER_EMAIL          "esp32-wesleys@clock.com"
-#define USER_PASSWORD       "123456"
-
-#define DATABASE_URL        "https://wesleys-clock-default-rtdb.firebaseio.com"
-#define API_KEY             "AIzaSyAFCIatremITVZz1iRzOEpH7gUicLCJ8Iw"
-#define POP_NEXT_EVENT_URL  "https://us-central1-wesleys-clock.cloudfunctions.net/popNextEsp32Event"
-#define COMPLETE_EVENT_URL  "https://us-central1-wesleys-clock.cloudfunctions.net/completeEsp32Event"
-
-#define FIREBASE_COUNTER    "/system_status/esp32_queue_state"
-#define FIREBASE_STORAGE    "wesleys-clock.firebasestorage.app"
+#include "secrets.h"
 
 #define TFT_CS1     13
 #define TFT_CS2     12
